@@ -28,6 +28,11 @@ venv/
 
 # Go
 /vendor/
+gpu-sched
+*.exe
+
+# State
+.gpu-sched-state.json
 
 # Rust
 /target/

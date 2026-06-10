@@ -1,0 +1,12 @@
+name: vit-training
+gpu:
+  min_count: 2
+  max_count: 2
+  min_memory_gb: 64
+  prefer_model: V100
+cpu_cores: 8
+memory_gb: 32
+estimated_minutes: 90
+priority: 5
+multi_card_comm: false
+user: alice

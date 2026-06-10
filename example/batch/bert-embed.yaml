@@ -1,0 +1,12 @@
+name: bert-embed
+gpu:
+  min_count: 1
+  max_count: 1
+  min_memory_gb: 16
+  prefer_model: ""
+cpu_cores: 4
+memory_gb: 16
+estimated_minutes: 30
+priority: 3
+multi_card_comm: false
+user: charlie

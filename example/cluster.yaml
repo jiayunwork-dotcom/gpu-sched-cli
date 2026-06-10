@@ -1,0 +1,155 @@
+nodes:
+  - name: node-a
+    cpu_cores: 128
+    memory_gb: 512
+    network_gbps: 100
+    gpus:
+      - id: gpu-a0
+        model: A100
+        memory_gb: 80
+        compute_tflops: 312
+      - id: gpu-a1
+        model: A100
+        memory_gb: 80
+        compute_tflops: 312
+      - id: gpu-a2
+        model: A100
+        memory_gb: 80
+        compute_tflops: 312
+      - id: gpu-a3
+        model: A100
+        memory_gb: 80
+        compute_tflops: 312
+      - id: gpu-a4
+        model: H100
+        memory_gb: 80
+        compute_tflops: 990
+      - id: gpu-a5
+        model: H100
+        memory_gb: 80
+        compute_tflops: 990
+      - id: gpu-a6
+        model: H100
+        memory_gb: 80
+        compute_tflops: 990
+      - id: gpu-a7
+        model: H100
+        memory_gb: 80
+        compute_tflops: 990
+    nvlinks:
+      - gpu1: gpu-a0
+        gpu2: gpu-a1
+        bandwidth_gbps: 600
+      - gpu1: gpu-a1
+        gpu2: gpu-a2
+        bandwidth_gbps: 600
+      - gpu1: gpu-a2
+        gpu2: gpu-a3
+        bandwidth_gbps: 600
+      - gpu1: gpu-a4
+        gpu2: gpu-a5
+        bandwidth_gbps: 900
+      - gpu1: gpu-a5
+        gpu2: gpu-a6
+        bandwidth_gbps: 900
+      - gpu1: gpu-a6
+        gpu2: gpu-a7
+        bandwidth_gbps: 900
+      - gpu1: gpu-a0
+        gpu2: gpu-a3
+        bandwidth_gbps: 600
+      - gpu1: gpu-a4
+        gpu2: gpu-a7
+        bandwidth_gbps: 900
+
+  - name: node-b
+    cpu_cores: 96
+    memory_gb: 384
+    network_gbps: 100
+    gpus:
+      - id: gpu-b0
+        model: A100
+        memory_gb: 40
+        compute_tflops: 312
+      - id: gpu-b1
+        model: A100
+        memory_gb: 40
+        compute_tflops: 312
+      - id: gpu-b2
+        model: V100
+        memory_gb: 32
+        compute_tflops: 125
+      - id: gpu-b3
+        model: V100
+        memory_gb: 32
+        compute_tflops: 125
+    nvlinks:
+      - gpu1: gpu-b0
+        gpu2: gpu-b1
+        bandwidth_gbps: 600
+      - gpu1: gpu-b2
+        gpu2: gpu-b3
+        bandwidth_gbps: 300
+
+  - name: node-c
+    cpu_cores: 256
+    memory_gb: 1024
+    network_gbps: 400
+    gpus:
+      - id: gpu-c0
+        model: H100
+        memory_gb: 80
+        compute_tflops: 990
+      - id: gpu-c1
+        model: H100
+        memory_gb: 80
+        compute_tflops: 990
+      - id: gpu-c2
+        model: H100
+        memory_gb: 80
+        compute_tflops: 990
+      - id: gpu-c3
+        model: H100
+        memory_gb: 80
+        compute_tflops: 990
+      - id: gpu-c4
+        model: H100
+        memory_gb: 80
+        compute_tflops: 990
+      - id: gpu-c5
+        model: H100
+        memory_gb: 80
+        compute_tflops: 990
+      - id: gpu-c6
+        model: H100
+        memory_gb: 80
+        compute_tflops: 990
+      - id: gpu-c7
+        model: H100
+        memory_gb: 80
+        compute_tflops: 990
+    nvlinks:
+      - gpu1: gpu-c0
+        gpu2: gpu-c1
+        bandwidth_gbps: 900
+      - gpu1: gpu-c1
+        gpu2: gpu-c2
+        bandwidth_gbps: 900
+      - gpu1: gpu-c2
+        gpu2: gpu-c3
+        bandwidth_gbps: 900
+      - gpu1: gpu-c4
+        gpu2: gpu-c5
+        bandwidth_gbps: 900
+      - gpu1: gpu-c5
+        gpu2: gpu-c6
+        bandwidth_gbps: 900
+      - gpu1: gpu-c6
+        gpu2: gpu-c7
+        bandwidth_gbps: 900
+      - gpu1: gpu-c0
+        gpu2: gpu-c3
+        bandwidth_gbps: 900
+      - gpu1: gpu-c4
+        gpu2: gpu-c7
+        bandwidth_gbps: 900

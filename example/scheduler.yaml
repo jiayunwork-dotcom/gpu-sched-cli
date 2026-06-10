@@ -1,0 +1,15 @@
+strategy: best-fit
+preempt_enabled: true
+sharing_enabled: true
+timeout_enabled: true
+timeout_multiplier: 2.0
+max_retries: 3
+gang_wait_timeout_min: 30
+queue_weights:
+  high: 0.5
+  medium: 0.3
+  low: 0.2
+user_quotas:
+  alice: 14400
+  bob: 7200
+  charlie: 10800

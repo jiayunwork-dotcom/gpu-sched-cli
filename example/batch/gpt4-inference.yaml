@@ -1,0 +1,12 @@
+name: gpt4-inference
+gpu:
+  min_count: 2
+  max_count: 4
+  min_memory_gb: 160
+  prefer_model: H100
+cpu_cores: 16
+memory_gb: 64
+estimated_minutes: 60
+priority: 9
+multi_card_comm: true
+user: bob

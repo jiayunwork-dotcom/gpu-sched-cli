@@ -1,0 +1,14 @@
+name: llama3-finetune
+gpu:
+  min_count: 4
+  max_count: 8
+  min_memory_gb: 320
+  prefer_model: A100
+cpu_cores: 32
+memory_gb: 128
+estimated_minutes: 120
+priority: 8
+multi_card_comm: true
+affinity: ""
+anti_affinity: ""
+user: alice

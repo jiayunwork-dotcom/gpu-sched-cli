@@ -1,0 +1,13 @@
+name: data-prep
+gpu:
+  min_count: 1
+  max_count: 1
+  min_memory_gb: 10
+  prefer_model: ""
+cpu_cores: 2
+memory_gb: 8
+estimated_minutes: 15
+priority: 2
+multi_card_comm: false
+anti_affinity: gpt4-inference
+user: alice
