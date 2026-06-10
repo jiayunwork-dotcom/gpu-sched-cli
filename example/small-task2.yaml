@@ -1,0 +1,14 @@
+name: small-job-2
+gpu:
+  min_count: 1
+  max_count: 1
+  min_memory_gb: 10
+  prefer_model: A100
+cpu_cores: 2
+memory_gb: 8
+estimated_minutes: 30
+priority: 5
+multi_card_comm: false
+affinity: ""
+anti_affinity: ""
+user: test

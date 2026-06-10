@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -113,6 +114,60 @@ var taskSimulateCmd = &cobra.Command{
 	},
 }
 
+var taskReprioritizeCmd = &cobra.Command{
+	Use:   "reprioritize <task-id> <new-priority>",
+	Short: "Change task priority dynamically (1-10)",
+	Args:  cobra.ExactArgs(2),
+	Run: func(cmd *cobra.Command, args []string) {
+		taskID := args[0]
+		newPriority, err := strconv.Atoi(args[1])
+		if err != nil {
+			fmt.Printf("Invalid priority: %s\n", args[1])
+			return
+		}
+		if newPriority < 1 || newPriority > 10 {
+			fmt.Println("Priority must be between 1 and 10")
+			return
+		}
+
+		t := globalStore.GetTask(taskID)
+		if t == nil {
+			fmt.Printf("Task %s not found\n", taskID)
+			return
+		}
+		if t.Status != model.TaskStatusRunning && t.Status != model.TaskStatusQueued && t.Status != model.TaskStatusSubmitted {
+			fmt.Printf("Cannot reprioritize task %s: current status is %s (must be running, queued, or submitted)\n", taskID, t.Status)
+			return
+		}
+
+		initSchedulerBackground()
+		oldPriority, ok, err := globalScheduler.ReprioritizeTask(taskID, newPriority)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			return
+		}
+		if !ok {
+			fmt.Printf("Failed to reprioritize task %s\n", taskID)
+			return
+		}
+		saveState()
+		fmt.Printf("Task %s priority changed: %d → %d\n", taskID, oldPriority, newPriority)
+
+		t = globalStore.GetTask(taskID)
+		if t.Status == model.TaskStatusRunning {
+			fmt.Println("  Status: still running")
+			if newPriority < oldPriority {
+				fmt.Println("  Triggered reschedule: checking for higher priority queued tasks")
+			}
+		} else if t.Status == model.TaskStatusQueued || t.Status == model.TaskStatusSubmitted {
+			fmt.Printf("  Status: %s\n", t.Status)
+			if newPriority >= 8 {
+				fmt.Println("  Priority raised to high - preemption may have occurred")
+			}
+		}
+	},
+}
+
 func init() {
 	taskCmd.AddCommand(taskStatusCmd)
 	taskCmd.AddCommand(taskListCmd)
@@ -120,5 +175,6 @@ func init() {
 	taskCmd.AddCommand(taskFailCmd)
 	taskCmd.AddCommand(taskCancelCmd)
 	taskCmd.AddCommand(taskSimulateCmd)
+	taskCmd.AddCommand(taskReprioritizeCmd)
 	rootCmd.AddCommand(taskCmd)
 }

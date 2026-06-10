@@ -15,6 +15,7 @@ type Store struct {
 	schedConfig *model.SchedulerConfig
 	userUsage   map[string]float64
 	taskCounter int
+	audit       *AuditLogger
 }
 
 func NewStore(cluster *model.Cluster, config *model.SchedulerConfig) *Store {
@@ -23,7 +24,12 @@ func NewStore(cluster *model.Cluster, config *model.SchedulerConfig) *Store {
 		tasks:       make(map[string]*model.Task),
 		schedConfig: config,
 		userUsage:   make(map[string]float64),
+		audit:       NewAuditLogger(),
 	}
+}
+
+func (s *Store) GetAuditLogger() *AuditLogger {
+	return s.audit
 }
 
 func (s *Store) GetCluster() *model.Cluster {
@@ -280,4 +286,22 @@ func (s *Store) FindTaskByID(id string) *model.Task {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.tasks[id]
+}
+
+func (s *Store) UpdateTaskPriority(id string, newPriority int) (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.tasks[id]
+	if !ok {
+		return 0, false
+	}
+	oldPriority := t.Spec.Priority
+	if newPriority < 1 {
+		newPriority = 1
+	}
+	if newPriority > 10 {
+		newPriority = 10
+	}
+	t.Spec.Priority = newPriority
+	return oldPriority, true
 }

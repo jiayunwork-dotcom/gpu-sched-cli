@@ -13,12 +13,13 @@ import (
 const defaultStateFile = ".gpu-sched-state.json"
 
 type PersistedState struct {
-	Tasks           map[string]*model.Task  `json:"tasks"`
-	TaskCounter     int                     `json:"task_counter"`
-	UserUsage       map[string]float64      `json:"user_usage"`
-	NodeStatus      map[string]string       `json:"node_status"`
-	GPUAllocs       map[string]*GPUAlloc    `json:"gpu_allocs"`
-	SchedulerConfig *model.SchedulerConfig  `json:"scheduler_config,omitempty"`
+	Tasks           map[string]*model.Task       `json:"tasks"`
+	TaskCounter     int                           `json:"task_counter"`
+	UserUsage       map[string]float64            `json:"user_usage"`
+	NodeStatus      map[string]string             `json:"node_status"`
+	GPUAllocs       map[string]*GPUAlloc          `json:"gpu_allocs"`
+	SchedulerConfig *model.SchedulerConfig        `json:"scheduler_config,omitempty"`
+	AuditRecords    []*model.AuditRecord          `json:"audit_records,omitempty"`
 }
 
 type GPUAlloc struct {
@@ -85,6 +86,7 @@ func (sm *StateManager) Save() error {
 		NodeStatus:      nodeStatus,
 		GPUAllocs:       gpuAllocs,
 		SchedulerConfig: sm.store.schedConfig,
+		AuditRecords:    sm.store.audit.AllRecords(),
 	}
 
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -177,6 +179,10 @@ func (sm *StateManager) Load() error {
 
 	if state.SchedulerConfig != nil {
 		sm.store.schedConfig = state.SchedulerConfig
+	}
+
+	if len(state.AuditRecords) > 0 {
+		sm.store.audit.SetRecords(state.AuditRecords)
 	}
 
 	return nil

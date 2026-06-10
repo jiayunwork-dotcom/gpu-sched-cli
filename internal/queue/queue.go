@@ -180,3 +180,53 @@ func (q *PriorityQueue) GetBorrowableTasks(fromLevel int) []*model.Task {
 	}
 	return tasks
 }
+
+func (q *PriorityQueue) Reprioritize(taskID string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	var task *model.Task
+	q.high = removeTaskAndCollect(q.high, taskID, &task)
+	q.med = removeTaskAndCollect(q.med, taskID, &task)
+	q.low = removeTaskAndCollect(q.low, taskID, &task)
+	if task == nil {
+		return
+	}
+	effectivePriority := task.Spec.Priority
+	if q.store.IsOverQuota(task.Spec.User) {
+		effectivePriority -= 2
+		if effectivePriority < 1 {
+			effectivePriority = 1
+		}
+	}
+	switch {
+	case effectivePriority >= 8:
+		q.high = append([]*model.Task{task}, q.high...)
+	case effectivePriority >= 4:
+		q.med = append([]*model.Task{task}, q.med...)
+	default:
+		q.low = append([]*model.Task{task}, q.low...)
+	}
+}
+
+func removeTaskAndCollect(tasks []*model.Task, id string, collected **model.Task) []*model.Task {
+	for i, t := range tasks {
+		if t.ID == id {
+			*collected = t
+			return append(tasks[:i], tasks[i+1:]...)
+		}
+	}
+	return tasks
+}
+
+func (q *PriorityQueue) Contains(taskID string) bool {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	for _, list := range []([]*model.Task){q.high, q.med, q.low} {
+		for _, t := range list {
+			if t.ID == taskID {
+				return true
+			}
+		}
+	}
+	return false
+}

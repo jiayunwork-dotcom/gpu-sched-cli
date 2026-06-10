@@ -53,6 +53,7 @@ func (s *Scheduler) runLoop() {
 func (s *Scheduler) Schedule() {
 	cfg := s.store.GetConfig()
 	cluster := s.store.GetCluster()
+	audit := s.store.GetAuditLogger()
 
 	for {
 		task := s.pq.Peek()
@@ -76,17 +77,48 @@ func (s *Scheduler) Schedule() {
 			s.store.UpdateTaskStatus(task.ID, model.TaskStatusRunning)
 			s.store.SetTaskAllocatedGPUs(task.ID, task.AllocatedGPUs, crossNode)
 			s.pq.Remove(task.ID)
+			isShared := false
+			for _, gpuID := range task.AllocatedGPUs {
+				gpu := cluster.FindGPUByID(gpuID)
+				if gpu != nil && gpu.Status == model.GPUStatusShared {
+					isShared = true
+					break
+				}
+			}
+			if isShared {
+				audit.Record(model.AuditDecisionShare, task.ID, task.AllocatedGPUs, "GPU共享分配", nil)
+			} else {
+				reason := "常规分配"
+				if task.Spec.MultiCardComm {
+					reason = "NVLink拓扑优选"
+				}
+				audit.Record(model.AuditDecisionAllocate, task.ID, task.AllocatedGPUs, reason, nil)
+			}
 			continue
 		}
 
 		if cfg.PreemptEnabled && effectivePriority >= 8 {
 			preempted := s.tryPreempt(task)
 			if preempted {
+				audit.Record(model.AuditDecisionPreempt, task.ID, nil, "高优先级抢占", nil)
 				allocated2, crossNode2 := s.tryAllocate(task, cluster, cfg)
 				if allocated2 {
 					s.store.UpdateTaskStatus(task.ID, model.TaskStatusRunning)
 					s.store.SetTaskAllocatedGPUs(task.ID, task.AllocatedGPUs, crossNode2)
 					s.pq.Remove(task.ID)
+					isShared := false
+					for _, gpuID := range task.AllocatedGPUs {
+						gpu := cluster.FindGPUByID(gpuID)
+						if gpu != nil && gpu.Status == model.GPUStatusShared {
+							isShared = true
+							break
+						}
+					}
+					if isShared {
+						audit.Record(model.AuditDecisionShare, task.ID, task.AllocatedGPUs, "抢占后共享分配", nil)
+					} else {
+						audit.Record(model.AuditDecisionAllocate, task.ID, task.AllocatedGPUs, "抢占后分配", nil)
+					}
 					continue
 				}
 			}
@@ -97,6 +129,7 @@ func (s *Scheduler) Schedule() {
 			s.store.SetGangWaitStart(task.ID)
 		}
 		s.pq.RequeueFront(task)
+		audit.Record(model.AuditDecisionQueue, task.ID, nil, "资源不足，排队等待", nil)
 		break
 	}
 }
@@ -534,6 +567,7 @@ func (s *Scheduler) checkAntiAffinity(task *model.Task, node *model.Node) bool {
 }
 
 func (s *Scheduler) tryPreempt(task *model.Task) bool {
+	audit := s.store.GetAuditLogger()
 	runningTasks := s.store.GetRunningTasks()
 	sort.Slice(runningTasks, func(i, j int) bool {
 		return runningTasks[i].Spec.Priority < runningTasks[j].Spec.Priority
@@ -550,10 +584,15 @@ func (s *Scheduler) tryPreempt(task *model.Task) bool {
 			continue
 		}
 
+		preemptedGPUs := make([]string, len(rt.AllocatedGPUs))
+		copy(preemptedGPUs, rt.AllocatedGPUs)
 		s.store.ReleaseTaskGPUs(rt.ID)
 		s.store.SetTaskPreempted(rt.ID)
 		s.store.RequeuePreemptedTask(rt.ID)
 		s.pq.RequeueFront(rt)
+		audit.Record(model.AuditDecisionPreempt, rt.ID, preemptedGPUs, "被高优先级任务抢占", map[string]string{
+			"preempted_by": task.ID,
+		})
 		return true
 	}
 	return false
@@ -580,6 +619,7 @@ func (s *Scheduler) EstimateWaitTime(task *model.Task) time.Duration {
 }
 
 func (s *Scheduler) HandleGangTimeout() {
+	audit := s.store.GetAuditLogger()
 	cfg := s.store.GetConfig()
 	queuedTasks := s.store.GetQueuedTasks()
 	for _, t := range queuedTasks {
@@ -591,14 +631,71 @@ func (s *Scheduler) HandleGangTimeout() {
 			if t.Spec.GPUReq.MaxCount > t.Spec.GPUReq.MinCount {
 				t.Spec.GPUReq.MaxCount = t.Spec.GPUReq.MinCount
 				s.store.SetGangWaitStart(t.ID)
+				audit.Record(model.AuditDecisionDowngrade, t.ID, nil, "Gang降级到最小卡数", map[string]string{
+					"min_gpu_count": fmt.Sprintf("%d", t.Spec.GPUReq.MinCount),
+				})
 				fmt.Printf("[gang-timeout] Task %s downgraded to min GPU count %d\n", t.ID, t.Spec.GPUReq.MinCount)
 			} else {
 				s.pq.Remove(t.ID)
 				s.store.UpdateTaskStatus(t.ID, model.TaskStatusQueued)
 				s.pq.RequeueFront(t)
 				s.store.SetGangWaitStart(t.ID)
+				audit.Record(model.AuditDecisionQueue, t.ID, nil, "Gang超时重新排队，无法满足最小卡数", map[string]string{
+					"min_gpu_count": fmt.Sprintf("%d", t.Spec.GPUReq.MinCount),
+				})
 				fmt.Printf("[gang-timeout] Task %s re-queued, cannot satisfy min GPU count %d\n", t.ID, t.Spec.GPUReq.MinCount)
 			}
 		}
 	}
+}
+
+func (s *Scheduler) ReprioritizeTask(taskID string, newPriority int) (int, bool, error) {
+	audit := s.store.GetAuditLogger()
+	cfg := s.store.GetConfig()
+	cluster := s.store.GetCluster()
+
+	oldPriority, ok := s.store.UpdateTaskPriority(taskID, newPriority)
+	if !ok {
+		return 0, false, fmt.Errorf("task %s not found", taskID)
+	}
+
+	task := s.store.GetTask(taskID)
+	if task == nil {
+		return 0, false, fmt.Errorf("task %s not found", taskID)
+	}
+
+	audit.Record(model.AuditDecisionReprioritize, taskID, nil, "优先级调整", map[string]string{
+		"old_priority": fmt.Sprintf("%d", oldPriority),
+		"new_priority": fmt.Sprintf("%d", newPriority),
+	})
+
+	if task.Status == model.TaskStatusQueued || task.Status == model.TaskStatusSubmitted {
+		s.pq.Reprioritize(taskID)
+	}
+
+	priorityIncreased := newPriority > oldPriority
+	priorityDecreased := newPriority < oldPriority
+
+	if priorityIncreased && newPriority >= 8 && task.Status == model.TaskStatusQueued {
+		preempted := s.tryPreempt(task)
+		if preempted {
+			allocated, crossNode := s.tryAllocate(task, cluster, cfg)
+			if allocated {
+				s.store.UpdateTaskStatus(task.ID, model.TaskStatusRunning)
+				s.store.SetTaskAllocatedGPUs(task.ID, task.AllocatedGPUs, crossNode)
+				s.pq.Remove(task.ID)
+				return oldPriority, true, nil
+			}
+		}
+	}
+
+	if priorityDecreased && task.Status == model.TaskStatusRunning {
+		s.Schedule()
+	}
+
+	if task.Status == model.TaskStatusQueued || task.Status == model.TaskStatusSubmitted {
+		s.Schedule()
+	}
+
+	return oldPriority, true, nil
 }
