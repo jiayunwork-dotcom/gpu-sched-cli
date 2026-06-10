@@ -70,7 +70,7 @@ func truncate(s string, n int) string {
 
 func init() {
 	historyCmd.Flags().StringVarP(&historyTaskID, "task", "t", "", "Filter by task ID")
-	historyCmd.Flags().StringVarP(&historyDecision, "type", "d", "", "Filter by decision type (allocate/preempt/share/queue/downgrade/reprioritize)")
+	historyCmd.Flags().StringVarP(&historyDecision, "type", "d", "", "Filter by decision type (allocate/preempt/share/queue/downgrade/reprioritize/blocked/unblocked/skipped/cycle_detect)")
 	historyCmd.Flags().IntVarP(&historyN, "count", "n", 50, "Number of records to show")
 	rootCmd.AddCommand(historyCmd)
 }

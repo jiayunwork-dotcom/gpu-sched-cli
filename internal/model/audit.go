@@ -11,6 +11,10 @@ const (
 	AuditDecisionQueue       AuditDecisionType = "queue"
 	AuditDecisionDowngrade   AuditDecisionType = "downgrade"
 	AuditDecisionReprioritize AuditDecisionType = "reprioritize"
+	AuditDecisionBlocked     AuditDecisionType = "blocked"
+	AuditDecisionUnblocked   AuditDecisionType = "unblocked"
+	AuditDecisionSkipped     AuditDecisionType = "skipped"
+	AuditDecisionCycleDetect AuditDecisionType = "cycle_detect"
 )
 
 type AuditRecord struct {

@@ -20,28 +20,54 @@ var submitCmd = &cobra.Command{
 			fmt.Printf("Error loading task: %v\n", err)
 			return
 		}
-		submitted := globalStore.AddTask(task)
-		globalStore.UpdateTaskStatus(submitted.ID, model.TaskStatusQueued)
-		globalQueue.Enqueue(submitted)
+
+		var submitted *model.Task
+		if len(task.DependsOn) > 0 {
+			submitted, err = globalStore.AddTaskWithDeps(task)
+			if err != nil {
+				fmt.Printf("Error submitting task: %v\n", err)
+				return
+			}
+			if submitted.Status == model.TaskStatusBlocked {
+				globalStore.GetAuditLogger().Record(model.AuditDecisionBlocked, submitted.ID, nil,
+					fmt.Sprintf("Task %s blocked: waiting for dependencies", submitted.ID),
+					map[string]string{
+						"dependencies": fmt.Sprintf("%v", submitted.Spec.DependsOn),
+					})
+			}
+		} else {
+			submitted = globalStore.AddTask(task)
+		}
+
+		if submitted.Status != model.TaskStatusBlocked {
+			globalStore.UpdateTaskStatus(submitted.ID, model.TaskStatusQueued)
+			globalQueue.Enqueue(submitted)
+		}
 
 		initSchedulerBackground()
 		time.Sleep(500 * time.Millisecond)
 		saveState()
 
-		waitEstimate := globalScheduler.EstimateWaitTime(submitted)
 		fmt.Printf("Task submitted successfully!\n")
 		fmt.Printf("  ID: %s\n", submitted.ID)
 		fmt.Printf("  Name: %s\n", submitted.Spec.Name)
 		fmt.Printf("  Priority: %d (%s)\n", submitted.Spec.Priority, submitted.QueueName())
-		fmt.Printf("  Estimated wait time: %v\n", waitEstimate)
 
-		if submitted.Status == model.TaskStatusRunning {
+		if len(submitted.Spec.DependsOn) > 0 {
+			fmt.Printf("  Depends on: %v\n", submitted.Spec.DependsOn)
+		}
+
+		if submitted.Status == model.TaskStatusBlocked {
+			fmt.Printf("  Status: BLOCKED (waiting for dependencies to complete)\n")
+		} else if submitted.Status == model.TaskStatusRunning {
 			fmt.Printf("  Status: RUNNING (GPUs allocated immediately)\n")
 			fmt.Printf("  Allocated GPUs: %v\n", submitted.AllocatedGPUs)
 			if submitted.CrossNode {
 				fmt.Printf("  ⚠ Cross-node communication - performance may degrade\n")
 			}
 		} else {
+			waitEstimate := globalScheduler.EstimateWaitTime(submitted)
+			fmt.Printf("  Estimated wait time: %v\n", waitEstimate)
 			fmt.Printf("  Status: Queued (waiting for GPU resources)\n")
 		}
 	},

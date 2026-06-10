@@ -5,9 +5,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/spf13/cobra"
+	"github.com/gpu-sched-cli/internal/dag"
 	"github.com/gpu-sched-cli/internal/model"
 	"github.com/gpu-sched-cli/internal/tui"
+	"github.com/spf13/cobra"
 )
 
 var taskCmd = &cobra.Command{
@@ -80,7 +81,14 @@ var taskCancelCmd = &cobra.Command{
 			globalStore.ReleaseTaskGPUs(args[0])
 		}
 		globalQueue.Remove(args[0])
-		globalStore.UpdateTaskStatus(args[0], model.TaskStatusFailed)
+		globalStore.UpdateTaskStatus(args[0], model.TaskStatusCancelled)
+
+		graph := globalStore.GetDepGraph()
+		skipped := cascadeSkipFromGraph(graph, args[0])
+		if len(skipped) > 0 {
+			fmt.Printf("  Cascade skipped %d downstream tasks: %v\n", len(skipped), skipped)
+		}
+
 		saveState()
 		fmt.Printf("Task %s cancelled\n", args[0])
 	},
@@ -177,4 +185,13 @@ func init() {
 	taskCmd.AddCommand(taskSimulateCmd)
 	taskCmd.AddCommand(taskReprioritizeCmd)
 	rootCmd.AddCommand(taskCmd)
+}
+
+func cascadeSkipFromGraph(graph *dag.DependencyGraph, failedTaskID string) []string {
+	audit := globalStore.GetAuditLogger()
+	return dag.CascadeSkip(graph, failedTaskID,
+		func(taskID string) *model.Task { return globalStore.GetTask(taskID) },
+		func(taskID string, status model.TaskStatus) { globalStore.UpdateTaskStatus(taskID, status) },
+		audit.Record,
+	)
 }

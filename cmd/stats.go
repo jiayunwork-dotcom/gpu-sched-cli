@@ -5,8 +5,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/spf13/cobra"
+	"github.com/gpu-sched-cli/internal/dag"
+	"github.com/gpu-sched-cli/internal/model"
 	"github.com/gpu-sched-cli/internal/stats"
+	"github.com/spf13/cobra"
 )
 
 var statsCmd = &cobra.Command{
@@ -65,6 +67,20 @@ var statsCmd = &cobra.Command{
 		fmt.Printf("  Total allocations:     %d\n", s.ShareStats.TotalAllocCount)
 		fmt.Printf("  Shared allocations:    %d\n", s.ShareStats.SharedCount)
 		fmt.Printf("  GPU sharing rate:      %.1f%%\n", s.ShareStats.ShareRate)
+		fmt.Println()
+
+		fmt.Println("--- DAG Statistics ---")
+		graph := globalStore.GetDepGraph()
+		if len(graph.AllNodes()) == 0 {
+			fmt.Println("  No task dependencies.")
+		} else {
+			dagStats := dag.ComputeStats(graph, func(id string) *model.Task {
+				return globalStore.GetTask(id)
+			})
+			fmt.Printf("  Blocked tasks:         %d\n", dagStats.BlockedCount)
+			fmt.Printf("  Avg dependency depth:  %.1f\n", dagStats.AvgDependencyDepth)
+			fmt.Printf("  Critical path length:  %d\n", dagStats.CriticalPathLen)
+		}
 		fmt.Println()
 	},
 }

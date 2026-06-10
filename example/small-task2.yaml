@@ -11,4 +11,6 @@ priority: 5
 multi_card_comm: false
 affinity: ""
 anti_affinity: ""
+depends_on:
+  - task-0001
 user: test

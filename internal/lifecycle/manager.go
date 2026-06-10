@@ -1,8 +1,10 @@
 package lifecycle
 
 import (
+	"fmt"
 	"time"
 
+	"github.com/gpu-sched-cli/internal/dag"
 	"github.com/gpu-sched-cli/internal/model"
 	"github.com/gpu-sched-cli/internal/queue"
 	"github.com/gpu-sched-cli/internal/scheduler"
@@ -143,6 +145,21 @@ func (m *Manager) CompleteTask(id string) {
 	}
 	m.store.ReleaseTaskGPUs(id)
 	m.store.UpdateTaskStatus(id, model.TaskStatusCompleted)
+
+	audit := m.store.GetAuditLogger()
+	graph := m.store.GetDepGraph()
+	dependents := graph.Dependents(id)
+	for _, depID := range dependents {
+		depTask := m.store.GetTask(depID)
+		if depTask != nil && depTask.Status == model.TaskStatusBlocked {
+			if m.store.AreDependenciesSatisfied(depID) {
+				m.store.UpdateTaskStatus(depID, model.TaskStatusQueued)
+				m.pq.Enqueue(depTask)
+				audit.Record(model.AuditDecisionUnblocked, depID, nil,
+					fmt.Sprintf("%s unblocked: dependencies satisfied", depID), nil)
+			}
+		}
+	}
 }
 
 func (m *Manager) FailTask(id string) {
@@ -152,4 +169,12 @@ func (m *Manager) FailTask(id string) {
 	}
 	m.store.ReleaseTaskGPUs(id)
 	m.store.UpdateTaskStatus(id, model.TaskStatusFailed)
+
+	audit := m.store.GetAuditLogger()
+	graph := m.store.GetDepGraph()
+	dag.CascadeSkip(graph, id,
+		func(taskID string) *model.Task { return m.store.GetTask(taskID) },
+		func(taskID string, status model.TaskStatus) { m.store.UpdateTaskStatus(taskID, status) },
+		audit.Record,
+	)
 }

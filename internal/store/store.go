@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gpu-sched-cli/internal/dag"
 	"github.com/gpu-sched-cli/internal/model"
 )
 
@@ -16,6 +17,7 @@ type Store struct {
 	userUsage   map[string]float64
 	taskCounter int
 	audit       *AuditLogger
+	depGraph    *dag.DependencyGraph
 }
 
 func NewStore(cluster *model.Cluster, config *model.SchedulerConfig) *Store {
@@ -25,6 +27,7 @@ func NewStore(cluster *model.Cluster, config *model.SchedulerConfig) *Store {
 		schedConfig: config,
 		userUsage:   make(map[string]float64),
 		audit:       NewAuditLogger(),
+		depGraph:    dag.NewDependencyGraph(),
 	}
 }
 
@@ -305,4 +308,173 @@ func (s *Store) UpdateTaskPriority(id string, newPriority int) (int, bool) {
 	}
 	t.Spec.Priority = newPriority
 	return oldPriority, true
+}
+
+func (s *Store) AddTaskWithDeps(spec *model.TaskSpec) (*model.Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, depID := range spec.DependsOn {
+		if _, ok := s.tasks[depID]; !ok {
+			return nil, fmt.Errorf("dependency task %s does not exist", depID)
+		}
+	}
+
+	s.taskCounter++
+	task := &model.Task{
+		ID:            fmt.Sprintf("task-%04d", s.taskCounter),
+		Spec:          *spec,
+		SubmittedAt:   time.Now(),
+		QueueEnterAt:  time.Now(),
+		AllocatedGPUs: []string{},
+	}
+
+	if len(spec.DependsOn) > 0 {
+		task.Status = model.TaskStatusBlocked
+	} else {
+		task.Status = model.TaskStatusSubmitted
+	}
+
+	s.tasks[task.ID] = task
+
+	for _, depID := range spec.DependsOn {
+		s.depGraph.AddEdge(task.ID, depID)
+	}
+
+	return task, nil
+}
+
+func (s *Store) AddTaskWithDepsBatch(specs []*model.TaskSpec) ([]*model.Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, spec := range specs {
+		for _, depID := range spec.DependsOn {
+			if _, ok := s.tasks[depID]; !ok {
+				found := false
+				for _, otherSpec := range specs {
+					if otherSpec.Name == depID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return nil, fmt.Errorf("dependency task %s does not exist", depID)
+				}
+			}
+		}
+	}
+
+	tempGraph := s.depGraph.Copy()
+
+	var tasks []*model.Task
+	nameToID := make(map[string]string)
+
+	for _, spec := range specs {
+		s.taskCounter++
+		task := &model.Task{
+			ID:            fmt.Sprintf("task-%04d", s.taskCounter),
+			Spec:          *spec,
+			SubmittedAt:   time.Now(),
+			QueueEnterAt:  time.Now(),
+			AllocatedGPUs: []string{},
+		}
+		nameToID[spec.Name] = task.ID
+		tasks = append(tasks, task)
+	}
+
+	for _, task := range tasks {
+		resolvedDeps := make([]string, 0, len(task.Spec.DependsOn))
+		for _, depName := range task.Spec.DependsOn {
+			if id, ok := nameToID[depName]; ok {
+				resolvedDeps = append(resolvedDeps, id)
+			} else {
+				resolvedDeps = append(resolvedDeps, depName)
+			}
+		}
+		task.Spec.DependsOn = resolvedDeps
+
+		if len(resolvedDeps) > 0 {
+			task.Status = model.TaskStatusBlocked
+		} else {
+			task.Status = model.TaskStatusSubmitted
+		}
+
+		for _, depID := range resolvedDeps {
+			tempGraph.AddEdge(task.ID, depID)
+		}
+	}
+
+	if cyclePath, hasCycle := dag.DetectCycle(tempGraph); hasCycle {
+		return nil, fmt.Errorf("dependency cycle detected: %s", formatCyclePath(cyclePath))
+	}
+
+	for _, task := range tasks {
+		s.tasks[task.ID] = task
+	}
+
+	s.depGraph = tempGraph
+
+	return tasks, nil
+}
+
+func formatCyclePath(path []string) string {
+	return stringsJoin(path, " → ")
+}
+
+func stringsJoin(elems []string, sep string) string {
+	result := ""
+	for i, e := range elems {
+		if i > 0 {
+			result += sep
+		}
+		result += e
+	}
+	return result
+}
+
+func (s *Store) GetDepGraph() *dag.DependencyGraph {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.depGraph
+}
+
+func (s *Store) AreDependenciesSatisfied(taskID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	deps := s.depGraph.Dependencies(taskID)
+	for _, depID := range deps {
+		t, ok := s.tasks[depID]
+		if !ok || t.Status != model.TaskStatusCompleted {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Store) HasFailedDependency(taskID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	deps := s.depGraph.Dependencies(taskID)
+	for _, depID := range deps {
+		t, ok := s.tasks[depID]
+		if !ok {
+			return true
+		}
+		if t.Status == model.TaskStatusFailed || t.Status == model.TaskStatusCancelled ||
+			t.Status == model.TaskStatusSkipped {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) GetBlockedTasks() []*model.Task {
+	return s.GetTasksByStatus(model.TaskStatusBlocked)
+}
+
+func (s *Store) SetDepGraph(g *dag.DependencyGraph) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.depGraph = g
 }

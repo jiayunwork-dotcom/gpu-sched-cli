@@ -50,7 +50,26 @@ func (s *Scheduler) runLoop() {
 	}
 }
 
+func (s *Scheduler) checkBlockedTasks() {
+	audit := s.store.GetAuditLogger()
+	blockedTasks := s.store.GetBlockedTasks()
+	for _, t := range blockedTasks {
+		if s.store.HasFailedDependency(t.ID) {
+			s.store.UpdateTaskStatus(t.ID, model.TaskStatusSkipped)
+			audit.Record(model.AuditDecisionSkipped, t.ID, nil, "依赖任务失败/取消，级联跳过", nil)
+			continue
+		}
+		if s.store.AreDependenciesSatisfied(t.ID) {
+			s.store.UpdateTaskStatus(t.ID, model.TaskStatusQueued)
+			s.pq.Enqueue(t)
+			audit.Record(model.AuditDecisionUnblocked, t.ID, nil, fmt.Sprintf("%s unblocked: dependencies satisfied", t.ID), nil)
+		}
+	}
+}
+
 func (s *Scheduler) Schedule() {
+	s.checkBlockedTasks()
+
 	cfg := s.store.GetConfig()
 	cluster := s.store.GetCluster()
 	audit := s.store.GetAuditLogger()

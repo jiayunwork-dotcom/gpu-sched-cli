@@ -13,6 +13,9 @@ const (
 	TaskStatusFailed       TaskStatus = "failed"
 	TaskStatusTimedOut     TaskStatus = "timed_out"
 	TaskStatusPreempted    TaskStatus = "preempted"
+	TaskStatusBlocked      TaskStatus = "blocked"
+	TaskStatusSkipped      TaskStatus = "skipped"
+	TaskStatusCancelled    TaskStatus = "cancelled"
 )
 
 type GPURequirement struct {
@@ -33,6 +36,7 @@ type TaskSpec struct {
 	Affinity        string        `yaml:"affinity" json:"affinity"`
 	AntiAffinity    string        `yaml:"anti_affinity" json:"anti_affinity"`
 	User            string        `yaml:"user" json:"user"`
+	DependsOn       []string      `yaml:"depends_on" json:"depends_on"`
 }
 
 type Task struct {

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gpu-sched-cli/internal/dag"
 	"github.com/gpu-sched-cli/internal/model"
 )
 
@@ -20,6 +21,7 @@ type PersistedState struct {
 	GPUAllocs       map[string]*GPUAlloc          `json:"gpu_allocs"`
 	SchedulerConfig *model.SchedulerConfig        `json:"scheduler_config,omitempty"`
 	AuditRecords    []*model.AuditRecord          `json:"audit_records,omitempty"`
+	DepEdges        map[string][]string           `json:"dep_edges,omitempty"`
 }
 
 type GPUAlloc struct {
@@ -87,6 +89,7 @@ func (sm *StateManager) Save() error {
 		GPUAllocs:       gpuAllocs,
 		SchedulerConfig: sm.store.schedConfig,
 		AuditRecords:    sm.store.audit.AllRecords(),
+		DepEdges:        sm.store.depGraph.AllNodes(),
 	}
 
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -187,6 +190,16 @@ func (sm *StateManager) Load() error {
 
 	if len(state.AuditRecords) > 0 {
 		sm.store.audit.SetRecords(state.AuditRecords)
+	}
+
+	if len(state.DepEdges) > 0 {
+		g := dag.NewDependencyGraph()
+		for from, deps := range state.DepEdges {
+			for _, dep := range deps {
+				g.AddEdge(from, dep)
+			}
+		}
+		sm.store.depGraph = g
 	}
 
 	return nil
