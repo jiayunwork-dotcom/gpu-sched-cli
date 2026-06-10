@@ -45,6 +45,9 @@ func initGlobals() error {
 	globalScheduler = scheduler.NewScheduler(globalStore, globalQueue, globalFairMgr, globalBorrowMgr)
 	globalLifecycle = lifecycle.NewManager(globalStore, globalQueue, globalScheduler)
 	stateMgr = store.NewStateManager(globalStore)
+	if stateFile != "" {
+		stateMgr.SetStateFile(stateFile)
+	}
 
 	if err := stateMgr.Load(); err != nil {
 		return fmt.Errorf("load state: %w", err)

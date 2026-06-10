@@ -12,6 +12,10 @@ func yamlUnmarshal(data []byte, v interface{}) error {
 	return yaml.Unmarshal(data, v)
 }
 
+var (
+	stateFile string
+)
+
 var rootCmd = &cobra.Command{
 	Use:   "gpu-sched",
 	Short: "GPU Cluster Resource Scheduler CLI",
@@ -31,4 +35,5 @@ func Execute() {
 func init() {
 	rootCmd.PersistentFlags().StringVarP(&clusterFile, "cluster", "c", "cluster.yaml", "Cluster configuration YAML file")
 	rootCmd.PersistentFlags().StringVarP(&schedulerFile, "scheduler", "s", "scheduler.yaml", "Scheduler configuration YAML file")
+	rootCmd.PersistentFlags().StringVar(&stateFile, "state", "", "State file path (default: ~/.gpu-sched-state.json)")
 }

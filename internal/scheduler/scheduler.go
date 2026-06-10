@@ -113,6 +113,36 @@ func (s *Scheduler) tryAllocate(task *model.Task, cluster *model.Cluster, cfg *m
 	}
 
 	nodes := s.getSortedNodes(cluster, cfg)
+	canShare := cfg.SharingEnabled && s.taskCanShare(task)
+
+	if canShare && cfg.Strategy == model.StrategyBestFit {
+		for _, node := range nodes {
+			if node.Status != "online" {
+				continue
+			}
+			if node.AvailableCPU() < task.Spec.CPUReq {
+				continue
+			}
+			if node.AvailableMemory() < task.Spec.MemoryReq {
+				continue
+			}
+			if !s.checkAffinity(task, node) {
+				continue
+			}
+			if !s.checkAntiAffinity(task, node) {
+				continue
+			}
+
+			gpus := s.findBestSharedGPUsOnNode(node, gpuCount, perGPUMem, task)
+			if len(gpus) >= task.Spec.GPUReq.MinCount {
+				actualCount := min(len(gpus), gpuCount)
+				gpus = gpus[:actualCount]
+				s.doAllocate(task, gpus, node, perGPUMem)
+				return true, false
+			}
+		}
+	}
+
 	for _, node := range nodes {
 		if node.Status != "online" {
 			continue
@@ -141,6 +171,9 @@ func (s *Scheduler) tryAllocate(task *model.Task, cluster *model.Cluster, cfg *m
 		}
 	}
 
+	if cfg.SharingEnabled && !canShare {
+		canShare = true
+	}
 	if cfg.SharingEnabled {
 		for _, node := range nodes {
 			if node.Status != "online" {
@@ -169,6 +202,19 @@ func (s *Scheduler) tryAllocate(task *model.Task, cluster *model.Cluster, cfg *m
 	}
 
 	return false, false
+}
+
+func (s *Scheduler) taskCanShare(task *model.Task) bool {
+	perGPUMem := task.Spec.GPUReq.MinMemory / task.Spec.GPUReq.MinCount
+	cluster := s.store.GetCluster()
+	for _, node := range cluster.Nodes {
+		for _, gpu := range node.GPUs {
+			if float64(perGPUMem) < float64(gpu.MemoryGB)*0.5 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Scheduler) allocateMultiCardWithTopology(task *model.Task, cluster *model.Cluster, cfg *model.SchedulerConfig, gpuCount, perGPUMem int) (bool, bool) {
@@ -334,6 +380,25 @@ func (s *Scheduler) findSharedGPUsOnNode(node *model.Node, count, perGPUMem int,
 			candidates = append(candidates, gpu)
 		}
 	}
+	if len(candidates) > count {
+		candidates = candidates[:count]
+	}
+	return candidates
+}
+
+func (s *Scheduler) findBestSharedGPUsOnNode(node *model.Node, count, perGPUMem int, task *model.Task) []*model.GPU {
+	var candidates []*model.GPU
+	for _, gpu := range node.GPUs {
+		if gpu.CanShare(perGPUMem) && s.matchModel(gpu, task) {
+			candidates = append(candidates, gpu)
+		}
+	}
+	if len(candidates) < count {
+		return candidates
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].AvailableMemory() < candidates[j].AvailableMemory()
+	})
 	if len(candidates) > count {
 		candidates = candidates[:count]
 	}

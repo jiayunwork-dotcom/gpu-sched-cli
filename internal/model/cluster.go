@@ -40,11 +40,17 @@ func (g *GPU) CanAllocate(needMemory int) bool {
 	if g.Status == GPUStatusFault {
 		return false
 	}
+	if g.Status != GPUStatusFree {
+		return false
+	}
 	return g.AvailableMemory() >= needMemory
 }
 
 func (g *GPU) CanShare(needMemory int) bool {
 	if g.Status == GPUStatusFault {
+		return false
+	}
+	if g.Status != GPUStatusShared && g.Status != GPUStatusAllocated {
 		return false
 	}
 	totalUsed := g.AllocatedMemory + needMemory

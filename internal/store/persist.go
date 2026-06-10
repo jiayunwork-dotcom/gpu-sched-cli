@@ -13,11 +13,12 @@ import (
 const defaultStateFile = ".gpu-sched-state.json"
 
 type PersistedState struct {
-	Tasks       map[string]*model.Task `json:"tasks"`
-	TaskCounter int                    `json:"task_counter"`
-	UserUsage   map[string]float64     `json:"user_usage"`
-	NodeStatus  map[string]string      `json:"node_status"`
-	GPUAllocs   map[string]*GPUAlloc   `json:"gpu_allocs"`
+	Tasks           map[string]*model.Task  `json:"tasks"`
+	TaskCounter     int                     `json:"task_counter"`
+	UserUsage       map[string]float64      `json:"user_usage"`
+	NodeStatus      map[string]string       `json:"node_status"`
+	GPUAllocs       map[string]*GPUAlloc    `json:"gpu_allocs"`
+	SchedulerConfig *model.SchedulerConfig  `json:"scheduler_config,omitempty"`
 }
 
 type GPUAlloc struct {
@@ -78,11 +79,12 @@ func (sm *StateManager) Save() error {
 	}
 
 	state := &PersistedState{
-		Tasks:       taskMap,
-		TaskCounter: sm.store.taskCounter,
-		UserUsage:   sm.store.userUsage,
-		NodeStatus:  nodeStatus,
-		GPUAllocs:   gpuAllocs,
+		Tasks:           taskMap,
+		TaskCounter:     sm.store.taskCounter,
+		UserUsage:       sm.store.userUsage,
+		NodeStatus:      nodeStatus,
+		GPUAllocs:       gpuAllocs,
+		SchedulerConfig: sm.store.schedConfig,
 	}
 
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -149,29 +151,78 @@ func (sm *StateManager) Load() error {
 	}
 
 	now := time.Now()
+	cfg := sm.store.schedConfig
+	var tasksToRelease []string
+
 	for _, t := range sm.store.tasks {
 		if t.Status == model.TaskStatusRunning && t.StartedAt != nil {
-			for _, gpuID := range t.AllocatedGPUs {
-				gpu := sm.store.cluster.FindGPUByID(gpuID)
-				if gpu != nil {
-					node := sm.store.cluster.Nodes[gpu.NodeName]
-					if node != nil {
-						node.UsedCPU += t.Spec.CPUReq / len(t.AllocatedGPUs)
-						node.UsedMemory += t.Spec.MemoryReq / len(t.AllocatedGPUs)
-					}
-				}
-			}
 			runtime := now.Sub(*t.StartedAt)
-			cfg := sm.store.schedConfig
 			if cfg.TimeoutEnabled && runtime > time.Duration(float64(t.Spec.EstimatedMin)*cfg.TimeoutMultiplier)*time.Minute {
 				t.Status = model.TaskStatusTimedOut
 				t.FinishedAt = &now
-				t.AllocatedGPUs = []string{}
+				tasksToRelease = append(tasksToRelease, t.ID)
 			}
 		}
 	}
 
+	for _, taskID := range tasksToRelease {
+		sm.releaseTaskGPUsInternal(taskID)
+	}
+
+	for _, t := range sm.store.tasks {
+		if t.Status != model.TaskStatusRunning && len(t.AllocatedGPUs) > 0 {
+			sm.releaseTaskGPUsInternal(t.ID)
+		}
+	}
+
+	if state.SchedulerConfig != nil {
+		sm.store.schedConfig = state.SchedulerConfig
+	}
+
 	return nil
+}
+
+func (sm *StateManager) releaseTaskGPUsInternal(taskID string) {
+	t, ok := sm.store.tasks[taskID]
+	if !ok {
+		return
+	}
+	for _, gpuID := range t.AllocatedGPUs {
+		gpu := sm.store.cluster.FindGPUByID(gpuID)
+		if gpu == nil {
+			continue
+		}
+		perGPUMem := t.Spec.GPUReq.MinMemory / len(t.AllocatedGPUs)
+		gpu.AllocatedMemory -= perGPUMem
+		if gpu.AllocatedMemory < 0 {
+			gpu.AllocatedMemory = 0
+		}
+		newTaskIDs := make([]string, 0, len(gpu.TaskIDs))
+		for _, tid := range gpu.TaskIDs {
+			if tid != taskID {
+				newTaskIDs = append(newTaskIDs, tid)
+			}
+		}
+		gpu.TaskIDs = newTaskIDs
+		if len(gpu.TaskIDs) == 0 {
+			gpu.Status = model.GPUStatusFree
+			gpu.AllocatedMemory = 0
+		} else {
+			gpu.Status = model.GPUStatusShared
+		}
+		node := sm.store.cluster.Nodes[gpu.NodeName]
+		if node != nil {
+			node.UsedCPU -= t.Spec.CPUReq / len(t.AllocatedGPUs)
+			node.UsedMemory -= t.Spec.MemoryReq / len(t.AllocatedGPUs)
+			if node.UsedCPU < 0 {
+				node.UsedCPU = 0
+			}
+			if node.UsedMemory < 0 {
+				node.UsedMemory = 0
+			}
+		}
+	}
+	t.AllocatedGPUs = []string{}
 }
 
 func (sm *StateManager) StateFile() string {
