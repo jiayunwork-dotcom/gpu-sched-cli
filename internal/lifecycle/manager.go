@@ -32,6 +32,7 @@ func (m *Manager) Start() {
 	go m.runRetryChecker()
 	go m.runGangTimeoutChecker()
 	go m.runUsageAccounting()
+	go m.runDepTimeoutChecker()
 }
 
 func (m *Manager) Stop() {
@@ -138,6 +139,32 @@ func (m *Manager) accountUsage() {
 	}
 }
 
+func (m *Manager) runDepTimeoutChecker() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			m.checkDepTimeouts()
+		case <-m.stopCh:
+			return
+		}
+	}
+}
+
+func (m *Manager) checkDepTimeouts() {
+	audit := m.store.GetAuditLogger()
+	newlyUnblocked := m.store.CheckDepTimeouts()
+	for _, taskID := range newlyUnblocked {
+		task := m.store.GetTask(taskID)
+		if task != nil {
+			m.pq.Enqueue(task)
+			audit.Record(model.AuditDecisionUnblocked, taskID, nil,
+				fmt.Sprintf("%s unblocked: dependencies satisfied (some may have timed out)", taskID), nil)
+		}
+	}
+}
+
 func (m *Manager) CompleteTask(id string) {
 	t := m.store.GetTask(id)
 	if t == nil {
@@ -169,6 +196,25 @@ func (m *Manager) FailTask(id string) {
 	}
 	m.store.ReleaseTaskGPUs(id)
 	m.store.UpdateTaskStatus(id, model.TaskStatusFailed)
+
+	audit := m.store.GetAuditLogger()
+	graph := m.store.GetDepGraph()
+	dag.CascadeSkip(graph, id,
+		func(taskID string) *model.Task { return m.store.GetTask(taskID) },
+		func(taskID string, status model.TaskStatus) { m.store.UpdateTaskStatus(taskID, status) },
+		audit.Record,
+	)
+}
+
+func (m *Manager) CancelTask(id string) {
+	t := m.store.GetTask(id)
+	if t == nil {
+		return
+	}
+	if t.Status == model.TaskStatusRunning {
+		m.store.ReleaseTaskGPUs(id)
+	}
+	m.store.UpdateTaskStatus(id, model.TaskStatusCancelled)
 
 	audit := m.store.GetAuditLogger()
 	graph := m.store.GetDepGraph()

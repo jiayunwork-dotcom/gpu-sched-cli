@@ -10,24 +10,26 @@ import (
 )
 
 type Store struct {
-	mu          sync.RWMutex
-	cluster     *model.Cluster
-	tasks       map[string]*model.Task
-	schedConfig *model.SchedulerConfig
-	userUsage   map[string]float64
-	taskCounter int
-	audit       *AuditLogger
-	depGraph    *dag.DependencyGraph
+	mu              sync.RWMutex
+	cluster         *model.Cluster
+	tasks           map[string]*model.Task
+	schedConfig     *model.SchedulerConfig
+	userUsage       map[string]float64
+	taskCounter     int
+	audit           *AuditLogger
+	depGraph        *dag.DependencyGraph
+	depTimeoutTrack *dag.DepTimeoutTracker
 }
 
 func NewStore(cluster *model.Cluster, config *model.SchedulerConfig) *Store {
 	return &Store{
-		cluster:     cluster,
-		tasks:       make(map[string]*model.Task),
-		schedConfig: config,
-		userUsage:   make(map[string]float64),
-		audit:       NewAuditLogger(),
-		depGraph:    dag.NewDependencyGraph(),
+		cluster:         cluster,
+		tasks:           make(map[string]*model.Task),
+		schedConfig:     config,
+		userUsage:       make(map[string]float64),
+		audit:           NewAuditLogger(),
+		depGraph:        dag.NewDependencyGraph(),
+		depTimeoutTrack: dag.NewDepTimeoutTracker(),
 	}
 }
 
@@ -314,9 +316,9 @@ func (s *Store) AddTaskWithDeps(spec *model.TaskSpec) (*model.Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for _, depID := range spec.DependsOn {
-		if _, ok := s.tasks[depID]; !ok {
-			return nil, fmt.Errorf("dependency task %s does not exist", depID)
+	for _, dep := range spec.DependsOn {
+		if _, ok := s.tasks[dep.Task]; !ok {
+			return nil, fmt.Errorf("dependency task %s does not exist", dep.Task)
 		}
 	}
 
@@ -337,8 +339,12 @@ func (s *Store) AddTaskWithDeps(spec *model.TaskSpec) (*model.Task, error) {
 
 	s.tasks[task.ID] = task
 
-	for _, depID := range spec.DependsOn {
-		s.depGraph.AddEdge(task.ID, depID)
+	for _, dep := range spec.DependsOn {
+		condition := dag.DepCondition(dep.Condition)
+		if condition == "" {
+			condition = dag.DepConditionCompleted
+		}
+		s.depGraph.AddEdgeWithOptions(task.ID, dep.Task, condition, dep.Weight, dep.Timeout)
 	}
 
 	return task, nil
@@ -349,17 +355,17 @@ func (s *Store) AddTaskWithDepsBatch(specs []*model.TaskSpec) ([]*model.Task, er
 	defer s.mu.Unlock()
 
 	for _, spec := range specs {
-		for _, depID := range spec.DependsOn {
-			if _, ok := s.tasks[depID]; !ok {
+		for _, dep := range spec.DependsOn {
+			if _, ok := s.tasks[dep.Task]; !ok {
 				found := false
 				for _, otherSpec := range specs {
-					if otherSpec.Name == depID {
+					if otherSpec.Name == dep.Task {
 						found = true
 						break
 					}
 				}
 				if !found {
-					return nil, fmt.Errorf("dependency task %s does not exist", depID)
+					return nil, fmt.Errorf("dependency task %s does not exist", dep.Task)
 				}
 			}
 		}
@@ -384,13 +390,18 @@ func (s *Store) AddTaskWithDepsBatch(specs []*model.TaskSpec) ([]*model.Task, er
 	}
 
 	for _, task := range tasks {
-		resolvedDeps := make([]string, 0, len(task.Spec.DependsOn))
-		for _, depName := range task.Spec.DependsOn {
-			if id, ok := nameToID[depName]; ok {
-				resolvedDeps = append(resolvedDeps, id)
-			} else {
-				resolvedDeps = append(resolvedDeps, depName)
+		resolvedDeps := make([]model.DependencySpec, 0, len(task.Spec.DependsOn))
+		for _, dep := range task.Spec.DependsOn {
+			depTask := dep.Task
+			if id, ok := nameToID[depTask]; ok {
+				depTask = id
 			}
+			resolvedDeps = append(resolvedDeps, model.DependencySpec{
+				Task:      depTask,
+				Condition: dep.Condition,
+				Weight:    dep.Weight,
+				Timeout:   dep.Timeout,
+			})
 		}
 		task.Spec.DependsOn = resolvedDeps
 
@@ -400,8 +411,16 @@ func (s *Store) AddTaskWithDepsBatch(specs []*model.TaskSpec) ([]*model.Task, er
 			task.Status = model.TaskStatusSubmitted
 		}
 
-		for _, depID := range resolvedDeps {
-			tempGraph.AddEdge(task.ID, depID)
+		for _, dep := range resolvedDeps {
+			condition := dag.DepCondition(dep.Condition)
+			if condition == "" {
+				condition = dag.DepConditionCompleted
+			}
+			weight := dep.Weight
+			if weight <= 0 {
+				weight = 1
+			}
+			tempGraph.AddEdgeWithOptions(task.ID, dep.Task, condition, weight, dep.Timeout)
 		}
 	}
 
@@ -442,10 +461,21 @@ func (s *Store) GetDepGraph() *dag.DependencyGraph {
 func (s *Store) AreDependenciesSatisfied(taskID string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	deps := s.depGraph.Dependencies(taskID)
-	for _, depID := range deps {
-		t, ok := s.tasks[depID]
-		if !ok || t.Status != model.TaskStatusCompleted {
+	return s.areDependenciesSatisfiedLocked(taskID)
+}
+
+func (s *Store) areDependenciesSatisfiedLocked(taskID string) bool {
+	edges := s.depGraph.DependencyEdges(taskID)
+	if len(edges) == 0 {
+		return true
+	}
+	for _, edge := range edges {
+		if s.depTimeoutTrack.IsTimedOut(taskID, edge.To) {
+			continue
+		}
+		if !dag.IsDependencySatisfied(edge, func(id string) *model.Task {
+			return s.tasks[id]
+		}) {
 			return false
 		}
 	}
@@ -455,14 +485,14 @@ func (s *Store) AreDependenciesSatisfied(taskID string) bool {
 func (s *Store) HasFailedDependency(taskID string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	deps := s.depGraph.Dependencies(taskID)
-	for _, depID := range deps {
-		t, ok := s.tasks[depID]
-		if !ok {
-			return true
+	edges := s.depGraph.DependencyEdges(taskID)
+	for _, edge := range edges {
+		if s.depTimeoutTrack.IsTimedOut(taskID, edge.To) {
+			continue
 		}
-		if t.Status == model.TaskStatusFailed || t.Status == model.TaskStatusCancelled ||
-			t.Status == model.TaskStatusSkipped {
+		if dag.IsDependencyFailed(edge, func(id string) *model.Task {
+			return s.tasks[id]
+		}) {
 			return true
 		}
 	}
@@ -477,4 +507,253 @@ func (s *Store) SetDepGraph(g *dag.DependencyGraph) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.depGraph = g
+}
+
+func (s *Store) AddDependency(taskID, depID string, condition model.DepCondition, weight int, timeout int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	task, ok := s.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("task %s not found", taskID)
+	}
+	if _, ok := s.tasks[depID]; !ok {
+		return fmt.Errorf("dependency task %s not found", depID)
+	}
+
+	if task.Status != model.TaskStatusBlocked && task.Status != model.TaskStatusQueued &&
+		task.Status != model.TaskStatusSubmitted {
+		return fmt.Errorf("cannot add dependency: task %s is in state %s (only blocked/queued/submitted allowed)",
+			taskID, task.Status)
+	}
+
+	tempGraph := s.depGraph.Copy()
+	dagCond := dag.DepCondition(condition)
+	if dagCond == "" {
+		dagCond = dag.DepConditionCompleted
+	}
+	if weight <= 0 {
+		weight = 1
+	}
+	tempGraph.AddEdgeWithOptions(taskID, depID, dagCond, weight, timeout)
+
+	if cyclePath, hasCycle := dag.DetectCycle(tempGraph); hasCycle {
+		return fmt.Errorf("cannot add dependency: would create cycle: %s", formatCyclePath(cyclePath))
+	}
+
+	s.depGraph = tempGraph
+
+	task.Spec.DependsOn = append(task.Spec.DependsOn, model.DependencySpec{
+		Task:      depID,
+		Condition: model.DepCondition(dagCond),
+		Weight:    weight,
+		Timeout:   timeout,
+	})
+
+	var becameBlocked bool
+	if task.Status == model.TaskStatusQueued || task.Status == model.TaskStatusSubmitted {
+		task.Status = model.TaskStatusBlocked
+		becameBlocked = true
+	}
+
+	s.audit.Record(model.AuditDecisionDepAdd, taskID, nil,
+		fmt.Sprintf("添加依赖: %s -> %s (condition=%s, weight=%d, timeout=%d)", taskID, depID, dagCond, weight, timeout),
+		map[string]string{
+			"dependency": depID,
+			"condition":  string(dagCond),
+			"weight":     fmt.Sprintf("%d", weight),
+			"timeout_min": fmt.Sprintf("%d", timeout),
+			"became_blocked": fmt.Sprintf("%t", becameBlocked),
+		})
+
+	return nil
+}
+
+func (s *Store) RemoveDependency(taskID, depID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	task, ok := s.tasks[taskID]
+	if !ok {
+		return false, fmt.Errorf("task %s not found", taskID)
+	}
+
+	if task.Status != model.TaskStatusBlocked && task.Status != model.TaskStatusQueued &&
+		task.Status != model.TaskStatusSubmitted {
+		return false, fmt.Errorf("cannot remove dependency: task %s is in state %s (only blocked/queued/submitted allowed)",
+			taskID, task.Status)
+	}
+
+	var removedEdge *dag.DependencyEdge
+	edges := s.depGraph.DependencyEdges(taskID)
+	for _, e := range edges {
+		if e.To == depID {
+			removedEdge = e
+			break
+		}
+	}
+
+	removed := s.depGraph.RemoveEdge(taskID, depID)
+	if !removed {
+		return false, nil
+	}
+
+	newDeps := make([]model.DependencySpec, 0, len(task.Spec.DependsOn))
+	for _, d := range task.Spec.DependsOn {
+		if d.Task != depID {
+			newDeps = append(newDeps, d)
+		}
+	}
+	task.Spec.DependsOn = newDeps
+
+	var becameUnblocked bool
+	if s.areDependenciesSatisfiedLocked(taskID) && task.Status == model.TaskStatusBlocked {
+		task.Status = model.TaskStatusQueued
+		task.QueueEnterAt = time.Now()
+		becameUnblocked = true
+	}
+
+	condition := "completed"
+	weight := 1
+	timeout := 0
+	if removedEdge != nil {
+		condition = string(removedEdge.Condition)
+		weight = removedEdge.Weight
+		timeout = removedEdge.Timeout
+	}
+	s.audit.Record(model.AuditDecisionDepRemove, taskID, nil,
+		fmt.Sprintf("移除依赖: %s -> %s (condition=%s, weight=%d, timeout=%d)", taskID, depID, condition, weight, timeout),
+		map[string]string{
+			"dependency":       depID,
+			"condition":        condition,
+			"weight":           fmt.Sprintf("%d", weight),
+			"timeout_min":      fmt.Sprintf("%d", timeout),
+			"became_unblocked": fmt.Sprintf("%t", becameUnblocked),
+		})
+
+	return true, nil
+}
+
+func (s *Store) CheckDepTimeouts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var newlyUnblocked []string
+	now := time.Now()
+
+	blockedTasks := s.getBlockedTasksLocked()
+	for _, t := range blockedTasks {
+		edges := s.depGraph.DependencyEdges(t.ID)
+		for _, edge := range edges {
+			if edge.Timeout <= 0 {
+				continue
+			}
+			if s.depTimeoutTrack.IsTimedOut(t.ID, edge.To) {
+				continue
+			}
+			if dag.IsDependencySatisfied(edge, func(id string) *model.Task {
+				return s.tasks[id]
+			}) {
+				continue
+			}
+			depTask := s.tasks[edge.To]
+			if depTask == nil {
+				continue
+			}
+			var startTime time.Time
+			if depTask.StartedAt != nil {
+				startTime = *depTask.StartedAt
+			} else {
+				startTime = depTask.SubmittedAt
+			}
+			elapsed := now.Sub(startTime)
+			timeoutDur := time.Duration(edge.Timeout) * time.Minute
+			if elapsed >= timeoutDur {
+				s.depTimeoutTrack.MarkTimedOut(t.ID, edge.To)
+				s.audit.Record(model.AuditDecisionDepTimeout, t.ID, nil,
+					fmt.Sprintf("依赖超时: 等待 %s 超过 %d 分钟", edge.To, edge.Timeout),
+					map[string]string{
+						"dependency": edge.To,
+						"timeout_min": fmt.Sprintf("%d", edge.Timeout),
+					})
+			}
+		}
+		if s.areDependenciesSatisfiedLocked(t.ID) && t.Status == model.TaskStatusBlocked {
+			t.Status = model.TaskStatusQueued
+			t.QueueEnterAt = now
+			newlyUnblocked = append(newlyUnblocked, t.ID)
+		}
+	}
+
+	return newlyUnblocked
+}
+
+func (s *Store) getBlockedTasksLocked() []*model.Task {
+	var result []*model.Task
+	for _, t := range s.tasks {
+		if t.Status == model.TaskStatusBlocked {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+func (s *Store) GetDepTimeoutTracker() *dag.DepTimeoutTracker {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.depTimeoutTrack
+}
+
+func (s *Store) HasRunningTasks() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, t := range s.tasks {
+		if t.Status == model.TaskStatusRunning || t.Status == model.TaskStatusScheduling {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) ReplaceDepGraph(newGraph *dag.DependencyGraph) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, t := range s.tasks {
+		if t.Status == model.TaskStatusRunning || t.Status == model.TaskStatusScheduling {
+			return fmt.Errorf("cannot replace dependency graph while tasks are running")
+		}
+	}
+
+	s.depGraph = newGraph
+	s.depTimeoutTrack = dag.NewDepTimeoutTracker()
+
+	for taskID := range s.tasks {
+		edges := newGraph.DependencyEdges(taskID)
+		deps := make([]model.DependencySpec, len(edges))
+		for i, e := range edges {
+			deps[i] = model.DependencySpec{
+				Task:      e.To,
+				Condition: model.DepCondition(e.Condition),
+				Weight:    e.Weight,
+				Timeout:   e.Timeout,
+			}
+		}
+		if t, ok := s.tasks[taskID]; ok {
+			t.Spec.DependsOn = deps
+			if len(deps) > 0 && t.Status != model.TaskStatusBlocked &&
+				t.Status != model.TaskStatusRunning && t.Status != model.TaskStatusCompleted &&
+				t.Status != model.TaskStatusFailed && t.Status != model.TaskStatusSkipped &&
+				t.Status != model.TaskStatusCancelled && t.Status != model.TaskStatusTimedOut &&
+				t.Status != model.TaskStatusPreempted {
+				t.Status = model.TaskStatusBlocked
+			}
+			if len(deps) == 0 && t.Status == model.TaskStatusBlocked {
+				t.Status = model.TaskStatusQueued
+				t.QueueEnterAt = time.Now()
+			}
+		}
+	}
+
+	return nil
 }

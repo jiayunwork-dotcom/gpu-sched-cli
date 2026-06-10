@@ -12,6 +12,10 @@ func yamlUnmarshal(data []byte, v interface{}) error {
 	return yaml.Unmarshal(data, v)
 }
 
+func yamlMarshal(v interface{}) ([]byte, error) {
+	return yaml.Marshal(v)
+}
+
 var (
 	stateFile string
 )

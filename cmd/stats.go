@@ -77,9 +77,24 @@ var statsCmd = &cobra.Command{
 			dagStats := dag.ComputeStats(graph, func(id string) *model.Task {
 				return globalStore.GetTask(id)
 			})
-			fmt.Printf("  Blocked tasks:         %d\n", dagStats.BlockedCount)
-			fmt.Printf("  Avg dependency depth:  %.1f\n", dagStats.AvgDependencyDepth)
-			fmt.Printf("  Critical path length:  %d\n", dagStats.CriticalPathLen)
+			fmt.Printf("  Blocked tasks:          %d\n", dagStats.BlockedCount)
+			fmt.Printf("  Avg dependency depth:   %.1f\n", dagStats.AvgDependencyDepth)
+			fmt.Printf("  Critical path weight:   %d\n", dagStats.CriticalPathLen)
+			if len(dagStats.CriticalPath) > 0 {
+				pathStr := ""
+				for i, n := range dagStats.CriticalPath {
+					if i > 0 {
+						pathStr += " → "
+					}
+					t := globalStore.GetTask(n)
+					if t != nil {
+						pathStr += t.Spec.Name
+					} else {
+						pathStr += n
+					}
+				}
+				fmt.Printf("  Critical path chain:    %s\n", pathStr)
+			}
 		}
 		fmt.Println()
 	},

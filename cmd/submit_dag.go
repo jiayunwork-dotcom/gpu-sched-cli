@@ -19,7 +19,17 @@ var submitDagCmd = &cobra.Command{
 	Short: "Submit a DAG of tasks from a YAML file (atomic batch)",
 	Long: `Submit an entire DAG described in a single YAML file. All tasks are validated
 before any are registered. If any task fails validation, the entire batch is rolled back.
-Task dependencies reference other tasks by name within the same file.`,
+Task dependencies reference other tasks by name within the same file.
+
+Dependencies can be specified as simple strings (task name) or with conditions:
+  - "task-name"                # default: completed condition, weight=1
+  - "task-name:success_or_skip" # with condition
+  - { task: task-name, condition: success_or_skip, weight: 2, timeout: 30 } # full format
+
+Conditions:
+  - completed:     dependency must complete successfully (default)
+  - success_or_skip: dependency completed or skipped both pass
+  - any_terminal:  any terminal state passes (completed/failed/skipped/cancelled)`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		tmpl, err := loadDAGTemplate(args[0])
@@ -54,10 +64,10 @@ Task dependencies reference other tasks by name within the same file.`,
 
 		for _, spec := range tmpl.Tasks {
 			for _, dep := range spec.DependsOn {
-				if !nameSet[dep] {
-					existingTask := globalStore.GetTaskBySpecName(dep)
+				if !nameSet[dep.Task] {
+					existingTask := globalStore.GetTaskBySpecName(dep.Task)
 					if existingTask == nil {
-						fmt.Printf("Task %q depends on %q which does not exist\n", spec.Name, dep)
+						fmt.Printf("Task %q depends on %q which does not exist\n", spec.Name, dep.Task)
 						fmt.Println("Batch submission aborted (no tasks registered)")
 						return
 					}
@@ -66,9 +76,21 @@ Task dependencies reference other tasks by name within the same file.`,
 		}
 
 		tempGraph := globalStore.GetDepGraph().Copy()
+		nameToID := make(map[string]string)
+		for _, spec := range tmpl.Tasks {
+			nameToID[spec.Name] = spec.Name
+		}
 		for _, spec := range tmpl.Tasks {
 			for _, dep := range spec.DependsOn {
-				tempGraph.AddEdge(spec.Name, dep)
+				condition := dag.DepCondition(dep.Condition)
+				if condition == "" {
+					condition = dag.DepConditionCompleted
+				}
+				weight := dep.Weight
+				if weight <= 0 {
+					weight = 1
+				}
+				tempGraph.AddEdgeWithOptions(spec.Name, dep.Task, condition, weight, dep.Timeout)
 			}
 		}
 		if cyclePath, hasCycle := dag.DetectCycle(tempGraph); hasCycle {
@@ -89,12 +111,13 @@ Task dependencies reference other tasks by name within the same file.`,
 			return
 		}
 
+		audit := globalStore.GetAuditLogger()
 		for _, task := range tasks {
 			if task.Status == model.TaskStatusBlocked {
-				globalStore.GetAuditLogger().Record(model.AuditDecisionBlocked, task.ID, nil,
+				audit.Record(model.AuditDecisionBlocked, task.ID, nil,
 					fmt.Sprintf("Task %s blocked: waiting for dependencies", task.ID),
 					map[string]string{
-						"dependencies": fmt.Sprintf("%v", task.Spec.DependsOn),
+						"dependencies": fmt.Sprintf("%v", task.Spec.DependsOnTaskNames()),
 					})
 			} else {
 				globalStore.UpdateTaskStatus(task.ID, model.TaskStatusQueued)
@@ -109,7 +132,8 @@ Task dependencies reference other tasks by name within the same file.`,
 			statusStr := string(task.Status)
 			depsStr := ""
 			if len(task.Spec.DependsOn) > 0 {
-				depsStr = fmt.Sprintf(" (depends on: %v)", task.Spec.DependsOn)
+				depNames := task.Spec.DependsOnTaskNames()
+				depsStr = fmt.Sprintf(" (depends on: %v)", depNames)
 			}
 			fmt.Printf("  %s: %s [%s]%s\n", task.ID, task.Spec.Name, statusStr, depsStr)
 		}
@@ -149,6 +173,14 @@ func validateTaskSpec(spec *model.TaskSpec) error {
 	}
 	if spec.User == "" {
 		spec.User = "default"
+	}
+	for i := range spec.DependsOn {
+		if spec.DependsOn[i].Condition == "" {
+			spec.DependsOn[i].Condition = model.DepConditionCompleted
+		}
+		if spec.DependsOn[i].Weight <= 0 {
+			spec.DependsOn[i].Weight = 1
+		}
 	}
 	return nil
 }

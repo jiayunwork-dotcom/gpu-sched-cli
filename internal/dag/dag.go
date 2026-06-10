@@ -3,33 +3,107 @@ package dag
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gpu-sched-cli/internal/model"
 )
 
+type DepCondition string
+
+const (
+	DepConditionCompleted    DepCondition = "completed"
+	DepConditionSuccessOrSkip DepCondition = "success_or_skip"
+	DepConditionAnyTerminal  DepCondition = "any_terminal"
+)
+
+type DependencyEdge struct {
+	From      string
+	To        string
+	Condition DepCondition
+	Weight    int
+	Timeout   int
+}
+
 type DependencyGraph struct {
-	edges map[string][]string
+	edges map[string][]*DependencyEdge
 }
 
 func NewDependencyGraph() *DependencyGraph {
 	return &DependencyGraph{
-		edges: make(map[string][]string),
+		edges: make(map[string][]*DependencyEdge),
 	}
 }
 
 func (g *DependencyGraph) AddEdge(from, to string) {
-	g.edges[from] = append(g.edges[from], to)
+	g.AddEdgeWithOptions(from, to, DepConditionCompleted, 1, 0)
+}
+
+func (g *DependencyGraph) AddEdgeWithOptions(from, to string, condition DepCondition, weight int, timeout int) {
+	if weight <= 0 {
+		weight = 1
+	}
+	edge := &DependencyEdge{
+		From:      from,
+		To:        to,
+		Condition: condition,
+		Weight:    weight,
+		Timeout:   timeout,
+	}
+	g.edges[from] = append(g.edges[from], edge)
+}
+
+func (g *DependencyGraph) RemoveEdge(from, to string) bool {
+	edges, ok := g.edges[from]
+	if !ok {
+		return false
+	}
+	found := false
+	newEdges := make([]*DependencyEdge, 0, len(edges))
+	for _, e := range edges {
+		if e.To == to {
+			found = true
+			continue
+		}
+		newEdges = append(newEdges, e)
+	}
+	if found {
+		if len(newEdges) == 0 {
+			delete(g.edges, from)
+		} else {
+			g.edges[from] = newEdges
+		}
+	}
+	return found
 }
 
 func (g *DependencyGraph) Dependencies(taskID string) []string {
+	edges := g.edges[taskID]
+	result := make([]string, len(edges))
+	for i, e := range edges {
+		result[i] = e.To
+	}
+	return result
+}
+
+func (g *DependencyGraph) DependencyEdges(taskID string) []*DependencyEdge {
 	return g.edges[taskID]
+}
+
+func (g *DependencyGraph) GetEdge(from, to string) *DependencyEdge {
+	edges := g.edges[from]
+	for _, e := range edges {
+		if e.To == to {
+			return e
+		}
+	}
+	return nil
 }
 
 func (g *DependencyGraph) Dependents(taskID string) []string {
 	var result []string
-	for from, deps := range g.edges {
-		for _, dep := range deps {
-			if dep == taskID {
+	for from, edges := range g.edges {
+		for _, e := range edges {
+			if e.To == taskID {
 				result = append(result, from)
 				break
 			}
@@ -38,16 +112,112 @@ func (g *DependencyGraph) Dependents(taskID string) []string {
 	return result
 }
 
-func (g *DependencyGraph) AllNodes() map[string][]string {
+func (g *DependencyGraph) AllNodes() map[string][]*DependencyEdge {
 	return g.edges
+}
+
+func (g *DependencyGraph) AllEdges() []*DependencyEdge {
+	var result []*DependencyEdge
+	for _, edges := range g.edges {
+		result = append(result, edges...)
+	}
+	return result
 }
 
 func (g *DependencyGraph) Copy() *DependencyGraph {
 	ng := NewDependencyGraph()
-	for k, v := range g.edges {
-		ng.edges[k] = append([]string{}, v...)
+	for k, edges := range g.edges {
+		newEdges := make([]*DependencyEdge, len(edges))
+		for i, e := range edges {
+			newEdges[i] = &DependencyEdge{
+				From:      e.From,
+				To:        e.To,
+				Condition: e.Condition,
+				Weight:    e.Weight,
+				Timeout:   e.Timeout,
+			}
+		}
+		ng.edges[k] = newEdges
 	}
 	return ng
+}
+
+func (g *DependencyGraph) HasNode(nodeID string) bool {
+	if _, ok := g.edges[nodeID]; ok {
+		return true
+	}
+	for _, edges := range g.edges {
+		for _, e := range edges {
+			if e.To == nodeID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func ParseDepCondition(cond string) DepCondition {
+	switch strings.ToLower(cond) {
+	case "success_or_skip":
+		return DepConditionSuccessOrSkip
+	case "any_terminal":
+		return DepConditionAnyTerminal
+	case "completed", "":
+		return DepConditionCompleted
+	default:
+		return DepConditionCompleted
+	}
+}
+
+func IsDependencySatisfied(edge *DependencyEdge, getTask func(string) *model.Task) bool {
+	t := getTask(edge.To)
+	if t == nil {
+		return false
+	}
+	switch edge.Condition {
+	case DepConditionCompleted:
+		return t.Status == model.TaskStatusCompleted
+	case DepConditionSuccessOrSkip:
+		return t.Status == model.TaskStatusCompleted || t.Status == model.TaskStatusSkipped
+	case DepConditionAnyTerminal:
+		return IsTerminalStatus(t.Status)
+	default:
+		return t.Status == model.TaskStatusCompleted
+	}
+}
+
+func IsDependencyFailed(edge *DependencyEdge, getTask func(string) *model.Task) bool {
+	t := getTask(edge.To)
+	if t == nil {
+		return true
+	}
+	switch edge.Condition {
+	case DepConditionCompleted:
+		return t.Status == model.TaskStatusFailed ||
+			t.Status == model.TaskStatusCancelled ||
+			t.Status == model.TaskStatusTimedOut ||
+			t.Status == model.TaskStatusSkipped
+	case DepConditionSuccessOrSkip:
+		return t.Status == model.TaskStatusFailed ||
+			t.Status == model.TaskStatusCancelled ||
+			t.Status == model.TaskStatusTimedOut
+	case DepConditionAnyTerminal:
+		return false
+	default:
+		return t.Status == model.TaskStatusFailed ||
+			t.Status == model.TaskStatusCancelled ||
+			t.Status == model.TaskStatusTimedOut ||
+			t.Status == model.TaskStatusSkipped
+	}
+}
+
+func IsTerminalStatus(status model.TaskStatus) bool {
+	return status == model.TaskStatusCompleted ||
+		status == model.TaskStatusFailed ||
+		status == model.TaskStatusSkipped ||
+		status == model.TaskStatusCancelled ||
+		status == model.TaskStatusTimedOut ||
+		status == model.TaskStatusPreempted
 }
 
 func DetectCycle(g *DependencyGraph) ([]string, bool) {
@@ -56,10 +226,10 @@ func DetectCycle(g *DependencyGraph) ([]string, bool) {
 	black := 2
 
 	allNodes := make(map[string]bool)
-	for from, deps := range g.edges {
+	for from, edges := range g.edges {
 		allNodes[from] = true
-		for _, dep := range deps {
-			allNodes[dep] = true
+		for _, e := range edges {
+			allNodes[e.To] = true
 		}
 	}
 
@@ -79,7 +249,9 @@ func DetectCycle(g *DependencyGraph) ([]string, bool) {
 			return
 		}
 		color[node] = gray
-		for _, dep := range g.edges[node] {
+		edges := g.edges[node]
+		for _, e := range edges {
+			dep := e.To
 			if found {
 				return
 			}
@@ -132,6 +304,10 @@ func CascadeSkip(g *DependencyGraph, failedTaskID string, getTask func(string) *
 			}
 			if t.Status == model.TaskStatusBlocked || t.Status == model.TaskStatusQueued ||
 				t.Status == model.TaskStatusSubmitted {
+				edge := g.GetEdge(depID, taskID)
+				if edge != nil && edge.Condition == DepConditionAnyTerminal {
+					continue
+				}
 				updateStatus(depID, model.TaskStatusSkipped)
 				skipped = append(skipped, depID)
 				if auditRecord != nil {
@@ -151,22 +327,22 @@ func CascadeSkip(g *DependencyGraph, failedTaskID string, getTask func(string) *
 }
 
 type DAGStats struct {
-	BlockedCount      int
+	BlockedCount       int
 	AvgDependencyDepth float64
-	CriticalPathLen   int
+	CriticalPathLen    int
+	CriticalPath       []string
 }
 
 func ComputeStats(g *DependencyGraph, getTask func(string) *model.Task) DAGStats {
 	blockedCount := 0
 	totalDepth := 0
 	taskCount := 0
-	maxDepth := 0
 
 	allNodes := make(map[string]bool)
-	for from, deps := range g.edges {
+	for from, edges := range g.edges {
 		allNodes[from] = true
-		for _, dep := range deps {
-			allNodes[dep] = true
+		for _, e := range edges {
+			allNodes[e.To] = true
 		}
 	}
 
@@ -175,12 +351,9 @@ func ComputeStats(g *DependencyGraph, getTask func(string) *model.Task) DAGStats
 		if t != nil && t.Status == model.TaskStatusBlocked {
 			blockedCount++
 		}
-		depth := computeDepth(g, node)
+		depth := computeWeightedDepth(g, node)
 		totalDepth += depth
 		taskCount++
-		if depth > maxDepth {
-			maxDepth = depth
-		}
 	}
 
 	avgDepth := 0.0
@@ -188,26 +361,88 @@ func ComputeStats(g *DependencyGraph, getTask func(string) *model.Task) DAGStats
 		avgDepth = float64(totalDepth) / float64(taskCount)
 	}
 
+	criticalPathLen, criticalPath := ComputeCriticalPath(g, getTask)
+
 	return DAGStats{
-		BlockedCount:      blockedCount,
+		BlockedCount:       blockedCount,
 		AvgDependencyDepth: avgDepth,
-		CriticalPathLen:   maxDepth,
+		CriticalPathLen:    criticalPathLen,
+		CriticalPath:       criticalPath,
 	}
 }
 
-func computeDepth(g *DependencyGraph, node string) int {
-	deps := g.edges[node]
-	if len(deps) == 0 {
+func computeWeightedDepth(g *DependencyGraph, node string) int {
+	edges := g.edges[node]
+	if len(edges) == 0 {
 		return 0
 	}
 	maxChildDepth := 0
-	for _, dep := range deps {
-		d := computeDepth(g, dep)
-		if d > maxChildDepth {
-			maxChildDepth = d
+	for _, e := range edges {
+		d := computeWeightedDepth(g, e.To)
+		weighted := d + e.Weight
+		if weighted > maxChildDepth {
+			maxChildDepth = weighted
 		}
 	}
-	return maxChildDepth + 1
+	return maxChildDepth
+}
+
+func ComputeCriticalPath(g *DependencyGraph, getTask func(string) *model.Task) (int, []string) {
+	allNodes := make(map[string]bool)
+	for from, edges := range g.edges {
+		allNodes[from] = true
+		for _, e := range edges {
+			allNodes[e.To] = true
+		}
+	}
+
+	var roots []string
+	dependent := make(map[string]bool)
+	for _, edges := range g.edges {
+		for _, e := range edges {
+			dependent[e.To] = true
+		}
+	}
+	for node := range allNodes {
+		if !dependent[node] {
+			roots = append(roots, node)
+		}
+	}
+
+	if len(roots) == 0 {
+		return 0, nil
+	}
+
+	maxWeight := 0
+	var bestPath []string
+	for _, root := range roots {
+		w, path := dfsCriticalPath(g, root)
+		if w > maxWeight {
+			maxWeight = w
+			bestPath = path
+		}
+	}
+
+	return maxWeight, bestPath
+}
+
+func dfsCriticalPath(g *DependencyGraph, node string) (int, []string) {
+	edges := g.edges[node]
+	if len(edges) == 0 {
+		return 0, []string{node}
+	}
+
+	maxWeight := 0
+	var bestPath []string
+	for _, e := range edges {
+		subWeight, subPath := dfsCriticalPath(g, e.To)
+		total := subWeight + e.Weight
+		if total > maxWeight {
+			maxWeight = total
+			bestPath = append([]string{node}, subPath...)
+		}
+	}
+	return maxWeight, bestPath
 }
 
 func RenderASCIITree(g *DependencyGraph, getTask func(string) *model.Task, rootTaskID string) string {
@@ -216,14 +451,20 @@ func RenderASCIITree(g *DependencyGraph, getTask func(string) *model.Task, rootT
 		allNodes[from] = true
 	}
 
+	_, criticalPath := ComputeCriticalPath(g, getTask)
+	criticalSet := make(map[string]bool)
+	for _, n := range criticalPath {
+		criticalSet[n] = true
+	}
+
 	var roots []string
 	if rootTaskID != "" {
 		roots = []string{rootTaskID}
 	} else {
 		dependent := make(map[string]bool)
-		for _, deps := range g.edges {
-			for _, dep := range deps {
-				dependent[dep] = true
+		for _, edges := range g.edges {
+			for _, e := range edges {
+				dependent[e.To] = true
 			}
 		}
 		for node := range allNodes {
@@ -240,13 +481,13 @@ func RenderASCIITree(g *DependencyGraph, getTask func(string) *model.Task, rootT
 		if i > 0 {
 			sb.WriteString("\n")
 		}
-		renderNode(&sb, g, getTask, root, "", true, visited)
+		renderNode(&sb, g, getTask, root, "", true, visited, criticalSet)
 	}
 
 	return sb.String()
 }
 
-func renderNode(sb *strings.Builder, g *DependencyGraph, getTask func(string) *model.Task, nodeID, prefix string, isLast bool, visited map[string]bool) {
+func renderNode(sb *strings.Builder, g *DependencyGraph, getTask func(string) *model.Task, nodeID, prefix string, isLast bool, visited map[string]bool, criticalSet map[string]bool) {
 	connector := "├── "
 	lastConnector := "└── "
 	if len(prefix) == 0 {
@@ -273,7 +514,12 @@ func renderNode(sb *strings.Builder, g *DependencyGraph, getTask func(string) *m
 		name = fmt.Sprintf("%s (%s)", t.Spec.Name, nodeID)
 	}
 
-	sb.WriteString(prefix + selectedConnector + name + statusStr + "\n")
+	prefixMark := ""
+	if criticalSet[nodeID] {
+		prefixMark = "*"
+	}
+
+	sb.WriteString(prefix + selectedConnector + prefixMark + name + statusStr + "\n")
 
 	if visited[nodeID] {
 		sb.WriteString(prefix + childPrefix(isLast, len(prefix) == 0) + "  (see above)\n")
@@ -281,8 +527,9 @@ func renderNode(sb *strings.Builder, g *DependencyGraph, getTask func(string) *m
 	}
 	visited[nodeID] = true
 
-	deps := g.edges[nodeID]
-	for i, dep := range deps {
+	edges := g.edges[nodeID]
+	for i, e := range edges {
+		dep := e.To
 		var childPrefix string
 		if len(prefix) == 0 {
 			if isLast {
@@ -297,8 +544,8 @@ func renderNode(sb *strings.Builder, g *DependencyGraph, getTask func(string) *m
 				childPrefix = prefix + "│   "
 			}
 		}
-		isDepLast := i == len(deps)-1
-		renderNode(sb, g, getTask, dep, childPrefix, isDepLast, visited)
+		isDepLast := i == len(edges)-1
+		renderNode(sb, g, getTask, dep, childPrefix, isDepLast, visited, criticalSet)
 	}
 }
 
@@ -339,16 +586,17 @@ func RenderSubTree(g *DependencyGraph, getTask func(string) *model.Task, rootTas
 		}
 	}
 
-	deps := g.edges[rootTaskID]
-	if len(deps) > 0 {
+	edges := g.edges[rootTaskID]
+	if len(edges) > 0 {
 		prefix := "└── depends on:\n"
 		if len(dependents) == 0 {
 			prefix = "├── depends on:\n"
 		}
 		sb.WriteString(prefix)
-		for i, depID := range deps {
+		for i, e := range edges {
+			depID := e.To
 			childPrefix := "    ├── "
-			if i == len(deps)-1 {
+			if i == len(edges)-1 {
 				childPrefix = "    └── "
 			}
 			dt := getTask(depID)
@@ -358,12 +606,27 @@ func RenderSubTree(g *DependencyGraph, getTask func(string) *model.Task, rootTas
 				depName = fmt.Sprintf("%s (%s)", dt.Spec.Name, depID)
 				depStatus = fmt.Sprintf(" [%s]", string(dt.Status))
 			}
-			sb.WriteString(childPrefix + depName + depStatus + "\n")
+			edgeInfo := ""
+			if e.Condition != DepConditionCompleted || e.Weight != 1 || e.Timeout > 0 {
+				var parts []string
+				if e.Condition != DepConditionCompleted {
+					parts = append(parts, string(e.Condition))
+				}
+				if e.Weight != 1 {
+					parts = append(parts, fmt.Sprintf("weight=%d", e.Weight))
+				}
+				if e.Timeout > 0 {
+					parts = append(parts, fmt.Sprintf("timeout=%dm", e.Timeout))
+				}
+				edgeInfo = " (" + strings.Join(parts, ", ") + ")"
+			}
+			sb.WriteString(childPrefix + depName + depStatus + edgeInfo + "\n")
 
-			subDeps := g.edges[depID]
-			for j, subDepID := range subDeps {
+			subEdges := g.edges[depID]
+			for j, se := range subEdges {
+				subDepID := se.To
 				subPrefix := "        ├── "
-				if j == len(subDeps)-1 {
+				if j == len(subEdges)-1 {
 					subPrefix = "        └── "
 				}
 				st := getTask(subDepID)
@@ -388,21 +651,30 @@ func RenderDOT(g *DependencyGraph, getTask func(string) *model.Task) string {
 	sb.WriteString("  node [shape=box, style=rounded];\n\n")
 
 	allNodes := make(map[string]bool)
-	for from, deps := range g.edges {
+	for from, edges := range g.edges {
 		allNodes[from] = true
-		for _, dep := range deps {
-			allNodes[dep] = true
+		for _, e := range edges {
+			allNodes[e.To] = true
 		}
+	}
+
+	_, criticalPath := ComputeCriticalPath(g, getTask)
+	criticalSet := make(map[string]bool)
+	criticalEdgeSet := make(map[string]bool)
+	for _, n := range criticalPath {
+		criticalSet[n] = true
+	}
+	for i := 0; i < len(criticalPath)-1; i++ {
+		key := criticalPath[i] + "->" + criticalPath[i+1]
+		criticalEdgeSet[key] = true
 	}
 
 	for node := range allNodes {
 		t := getTask(node)
 		label := node
-		statusStr := ""
 		color := "white"
 		if t != nil {
 			label = fmt.Sprintf("%s\\n(%s)", t.Spec.Name, node)
-			statusStr = string(t.Status)
 			switch t.Status {
 			case model.TaskStatusBlocked:
 				color = "lightyellow"
@@ -418,18 +690,71 @@ func RenderDOT(g *DependencyGraph, getTask func(string) *model.Task) string {
 				color = "lightgrey"
 			}
 		}
-		sb.WriteString(fmt.Sprintf("  \"%s\" [label=\"%s\", fillcolor=%s, style=\"rounded,filled\"];\n", node, label, color))
-		_ = statusStr
+		if criticalSet[node] {
+			sb.WriteString(fmt.Sprintf("  \"%s\" [label=\"%s\", fillcolor=%s, style=\"rounded,filled,bold\"];\n", node, label, color))
+		} else {
+			sb.WriteString(fmt.Sprintf("  \"%s\" [label=\"%s\", fillcolor=%s, style=\"rounded,filled\"];\n", node, label, color))
+		}
 	}
 
 	sb.WriteString("\n")
 
-	for from, deps := range g.edges {
-		for _, dep := range deps {
-			sb.WriteString(fmt.Sprintf("  \"%s\" -> \"%s\";\n", from, dep))
+	for from, edges := range g.edges {
+		for _, e := range edges {
+			edgeLabel := ""
+			style := ""
+			key := from + "->" + e.To
+			if criticalEdgeSet[key] {
+				style = " [style=bold, color=red]"
+			}
+			if e.Weight != 1 || e.Condition != DepConditionCompleted || e.Timeout > 0 {
+				var parts []string
+				if e.Weight != 1 {
+					parts = append(parts, fmt.Sprintf("w=%d", e.Weight))
+				}
+				if e.Condition != DepConditionCompleted {
+					parts = append(parts, string(e.Condition))
+				}
+				if e.Timeout > 0 {
+					parts = append(parts, fmt.Sprintf("t=%dm", e.Timeout))
+				}
+				edgeLabel = fmt.Sprintf(" [label=\"%s\"]", strings.Join(parts, ","))
+			}
+			sb.WriteString(fmt.Sprintf("  \"%s\" -> \"%s\"%s%s;\n", from, e.To, style, edgeLabel))
 		}
 	}
 
 	sb.WriteString("}\n")
 	return sb.String()
+}
+
+type DepTimeoutTracker struct {
+	StartTime   map[string]time.Time
+	TimedOutSet map[string]map[string]bool
+}
+
+func NewDepTimeoutTracker() *DepTimeoutTracker {
+	return &DepTimeoutTracker{
+		StartTime:   make(map[string]time.Time),
+		TimedOutSet: make(map[string]map[string]bool),
+	}
+}
+
+func (t *DepTimeoutTracker) MarkTimedOut(taskID, depID string) {
+	if _, ok := t.TimedOutSet[taskID]; !ok {
+		t.TimedOutSet[taskID] = make(map[string]bool)
+	}
+	t.TimedOutSet[taskID][depID] = true
+}
+
+func (t *DepTimeoutTracker) IsTimedOut(taskID, depID string) bool {
+	if set, ok := t.TimedOutSet[taskID]; ok {
+		return set[depID]
+	}
+	return false
+}
+
+func (t *DepTimeoutTracker) Reset(taskID string) {
+	delete(t.StartTime, taskID)
+	delete(t.TimedOutSet, taskID)
 }

@@ -13,6 +13,14 @@ import (
 
 const defaultStateFile = ".gpu-sched-state.json"
 
+type PersistedDepEdge struct {
+	From      string `json:"from"`
+	To        string `json:"to"`
+	Condition string `json:"condition,omitempty"`
+	Weight    int    `json:"weight,omitempty"`
+	Timeout   int    `json:"timeout,omitempty"`
+}
+
 type PersistedState struct {
 	Tasks           map[string]*model.Task       `json:"tasks"`
 	TaskCounter     int                           `json:"task_counter"`
@@ -21,7 +29,8 @@ type PersistedState struct {
 	GPUAllocs       map[string]*GPUAlloc          `json:"gpu_allocs"`
 	SchedulerConfig *model.SchedulerConfig        `json:"scheduler_config,omitempty"`
 	AuditRecords    []*model.AuditRecord          `json:"audit_records,omitempty"`
-	DepEdges        map[string][]string           `json:"dep_edges,omitempty"`
+	DepEdges        []PersistedDepEdge            `json:"dep_edges,omitempty"`
+	DepEdgesOld     map[string][]string           `json:"-"`
 }
 
 type GPUAlloc struct {
@@ -81,6 +90,22 @@ func (sm *StateManager) Save() error {
 		taskMap[t.ID] = t
 	}
 
+	depGraph := sm.store.depGraph
+	var depEdges []PersistedDepEdge
+	if depGraph != nil {
+		for from, edges := range depGraph.AllNodes() {
+			for _, e := range edges {
+				depEdges = append(depEdges, PersistedDepEdge{
+					From:      from,
+					To:        e.To,
+					Condition: string(e.Condition),
+					Weight:    e.Weight,
+					Timeout:   e.Timeout,
+				})
+			}
+		}
+	}
+
 	state := &PersistedState{
 		Tasks:           taskMap,
 		TaskCounter:     sm.store.taskCounter,
@@ -89,7 +114,7 @@ func (sm *StateManager) Save() error {
 		GPUAllocs:       gpuAllocs,
 		SchedulerConfig: sm.store.schedConfig,
 		AuditRecords:    sm.store.audit.AllRecords(),
-		DepEdges:        sm.store.depGraph.AllNodes(),
+		DepEdges:        depEdges,
 	}
 
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -194,10 +219,16 @@ func (sm *StateManager) Load() error {
 
 	if len(state.DepEdges) > 0 {
 		g := dag.NewDependencyGraph()
-		for from, deps := range state.DepEdges {
-			for _, dep := range deps {
-				g.AddEdge(from, dep)
+		for _, e := range state.DepEdges {
+			condition := dag.DepCondition(e.Condition)
+			if condition == "" {
+				condition = dag.DepConditionCompleted
 			}
+			weight := e.Weight
+			if weight <= 0 {
+				weight = 1
+			}
+			g.AddEdgeWithOptions(e.From, e.To, condition, weight, e.Timeout)
 		}
 		sm.store.depGraph = g
 	}

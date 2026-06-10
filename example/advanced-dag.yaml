@@ -1,0 +1,86 @@
+tasks:
+  - name: data-preprocess
+    gpu:
+      min_count: 1
+      max_count: 1
+      min_memory_gb: 10
+    cpu_cores: 4
+    memory_gb: 16
+    estimated_minutes: 30
+    priority: 5
+    user: alice
+
+  - name: feature-extract
+    gpu:
+      min_count: 2
+      max_count: 2
+      min_memory_gb: 40
+      prefer_model: A100
+    cpu_cores: 8
+    memory_gb: 32
+    estimated_minutes: 45
+    priority: 6
+    depends_on:
+      - data-preprocess
+    user: alice
+
+  - name: model-train
+    gpu:
+      min_count: 4
+      max_count: 8
+      min_memory_gb: 320
+      prefer_model: A100
+    cpu_cores: 32
+    memory_gb: 128
+    estimated_minutes: 120
+    priority: 8
+    multi_card_comm: true
+    depends_on:
+      - task: feature-extract
+        weight: 3
+    user: alice
+
+  - name: eval-benchmark
+    gpu:
+      min_count: 1
+      max_count: 1
+      min_memory_gb: 20
+    cpu_cores: 4
+    memory_gb: 16
+    estimated_minutes: 20
+    priority: 5
+    depends_on:
+      - task: model-train
+        condition: success_or_skip
+        weight: 2
+    user: bob
+
+  - name: deploy-inference
+    gpu:
+      min_count: 2
+      max_count: 2
+      min_memory_gb: 80
+    cpu_cores: 8
+    memory_gb: 32
+    estimated_minutes: 15
+    priority: 7
+    depends_on:
+      - task: model-train
+        condition: completed
+      - task: eval-benchmark
+        condition: any_terminal
+        timeout: 60
+    user: bob
+
+  - name: data-quality-check
+    gpu:
+      min_count: 1
+      max_count: 1
+      min_memory_gb: 8
+    cpu_cores: 2
+    memory_gb: 8
+    estimated_minutes: 10
+    priority: 4
+    depends_on:
+      - data-preprocess:success_or_skip
+    user: alice
