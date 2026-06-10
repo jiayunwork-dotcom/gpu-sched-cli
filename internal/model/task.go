@@ -40,6 +40,7 @@ type Task struct {
 	Spec            TaskSpec      `yaml:"-" json:"spec"`
 	Status          TaskStatus    `yaml:"-" json:"status"`
 	AllocatedGPUs   []string      `yaml:"-" json:"allocated_gpus"`
+	GPUCount        int           `yaml:"-" json:"gpu_count"`
 	CrossNode       bool          `yaml:"-" json:"cross_node"`
 	SubmittedAt     time.Time     `yaml:"-" json:"submitted_at"`
 	StartedAt       *time.Time    `yaml:"-" json:"started_at"`

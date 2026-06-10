@@ -70,7 +70,10 @@ func (f *FairShareManager) StartAccountingLoop(stopCh <-chan struct{}) {
 func (f *FairShareManager) accountRunningTasks() {
 	runningTasks := f.store.GetRunningTasks()
 	for _, t := range runningTasks {
-		gpuCount := len(t.AllocatedGPUs)
+		gpuCount := t.GPUCount
+		if gpuCount == 0 {
+			gpuCount = len(t.AllocatedGPUs)
+		}
 		if gpuCount > 0 {
 			f.RecordUsage(t.Spec.User, gpuCount)
 		}

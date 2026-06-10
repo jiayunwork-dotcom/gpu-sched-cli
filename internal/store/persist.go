@@ -93,7 +93,11 @@ func (sm *StateManager) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(sm.stateFile, data, 0644)
+	tmpFile := sm.stateFile + ".tmp"
+	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmpFile, sm.stateFile)
 }
 
 func (sm *StateManager) Load() error {

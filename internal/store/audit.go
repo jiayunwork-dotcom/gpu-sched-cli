@@ -23,14 +23,28 @@ func NewAuditLogger() *AuditLogger {
 func (al *AuditLogger) Record(decisionType model.AuditDecisionType, taskID string, gpus []string, reason string, extra map[string]string) {
 	al.mu.Lock()
 	defer al.mu.Unlock()
+	al.recordLocked(decisionType, taskID, gpus, reason, extra)
+}
+
+func (al *AuditLogger) recordLocked(decisionType model.AuditDecisionType, taskID string, gpus []string, reason string, extra map[string]string) {
+	gpuCopy := make([]string, len(gpus))
+	copy(gpuCopy, gpus)
+
+	var extraCopy map[string]string
+	if extra != nil {
+		extraCopy = make(map[string]string, len(extra))
+		for k, v := range extra {
+			extraCopy[k] = v
+		}
+	}
 
 	record := &model.AuditRecord{
 		Timestamp:    time.Now(),
 		DecisionType: decisionType,
 		TaskID:       taskID,
-		GPUs:         gpus,
+		GPUs:         gpuCopy,
 		Reason:       reason,
-		Extra:        extra,
+		Extra:        extraCopy,
 	}
 	al.records = append(al.records, record)
 
@@ -42,15 +56,16 @@ func (al *AuditLogger) Record(decisionType model.AuditDecisionType, taskID strin
 func (al *AuditLogger) GetRecords(n int) []*model.AuditRecord {
 	al.mu.RLock()
 	defer al.mu.RUnlock()
+	return al.getRecordsLocked(n)
+}
 
+func (al *AuditLogger) getRecordsLocked(n int) []*model.AuditRecord {
 	if n <= 0 || n > len(al.records) {
 		n = len(al.records)
 	}
 	result := make([]*model.AuditRecord, n)
 	start := len(al.records) - n
-	for i := 0; i < n; i++ {
-		result[i] = al.records[start+i]
-	}
+	copy(result, al.records[start:])
 	return result
 }
 
@@ -58,11 +73,13 @@ func (al *AuditLogger) Filter(taskID string, decisionType model.AuditDecisionTyp
 	al.mu.RLock()
 	defer al.mu.RUnlock()
 
-	all := al.GetRecords(len(al.records))
-	var filtered []*model.AuditRecord
+	if n <= 0 {
+		n = 50
+	}
 
-	for i := len(all) - 1; i >= 0; i-- {
-		r := all[i]
+	var filtered []*model.AuditRecord
+	for i := len(al.records) - 1; i >= 0; i-- {
+		r := al.records[i]
 		if taskID != "" && r.TaskID != taskID {
 			continue
 		}
@@ -81,15 +98,14 @@ func (al *AuditLogger) Filter(taskID string, decisionType model.AuditDecisionTyp
 func (al *AuditLogger) AllRecords() []*model.AuditRecord {
 	al.mu.RLock()
 	defer al.mu.RUnlock()
-	result := make([]*model.AuditRecord, len(al.records))
-	copy(result, al.records)
-	return result
+	return al.getRecordsLocked(len(al.records))
 }
 
 func (al *AuditLogger) SetRecords(records []*model.AuditRecord) {
 	al.mu.Lock()
 	defer al.mu.Unlock()
-	al.records = records
+	al.records = make([]*model.AuditRecord, len(records))
+	copy(al.records, records)
 }
 
 func (al *AuditLogger) RecordsSince(since time.Time) []*model.AuditRecord {

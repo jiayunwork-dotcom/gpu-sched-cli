@@ -65,8 +65,11 @@ func computeUserGPUHours(tasks []*model.Task, since24h time.Time) []UserGPUHours
 		if t.StartedAt == nil {
 			continue
 		}
-		gpuCount := len(t.AllocatedGPUs)
-		if gpuCount == 0 && t.StartedAt != nil && t.FinishedAt != nil {
+		gpuCount := t.GPUCount
+		if gpuCount == 0 {
+			gpuCount = len(t.AllocatedGPUs)
+		}
+		if gpuCount == 0 {
 			continue
 		}
 

@@ -126,7 +126,10 @@ func (m *Manager) runUsageAccounting() {
 func (m *Manager) accountUsage() {
 	running := m.store.GetRunningTasks()
 	for _, t := range running {
-		gpuCount := len(t.AllocatedGPUs)
+		gpuCount := t.GPUCount
+		if gpuCount == 0 {
+			gpuCount = len(t.AllocatedGPUs)
+		}
 		if gpuCount > 0 {
 			m.store.AddUserUsage(t.Spec.User, float64(gpuCount))
 		}

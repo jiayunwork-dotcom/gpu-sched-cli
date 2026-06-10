@@ -92,6 +92,7 @@ func (s *Store) SetTaskAllocatedGPUs(id string, gpuIDs []string, crossNode bool)
 	defer s.mu.Unlock()
 	if t, ok := s.tasks[id]; ok {
 		t.AllocatedGPUs = gpuIDs
+		t.GPUCount = len(gpuIDs)
 		t.CrossNode = crossNode
 	}
 }
