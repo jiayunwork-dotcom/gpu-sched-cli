@@ -77,17 +77,8 @@ var taskCancelCmd = &cobra.Command{
 			fmt.Printf("Task %s not found\n", args[0])
 			return
 		}
-		if t.Status == model.TaskStatusRunning {
-			globalStore.ReleaseTaskGPUs(args[0])
-		}
 		globalQueue.Remove(args[0])
-		globalStore.UpdateTaskStatus(args[0], model.TaskStatusCancelled)
-
-		graph := globalStore.GetDepGraph()
-		skipped := cascadeSkipFromGraph(graph, args[0])
-		if len(skipped) > 0 {
-			fmt.Printf("  Cascade skipped %d downstream tasks: %v\n", len(skipped), skipped)
-		}
+		globalLifecycle.CancelTask(args[0])
 
 		saveState()
 		fmt.Printf("Task %s cancelled\n", args[0])

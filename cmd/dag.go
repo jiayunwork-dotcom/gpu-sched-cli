@@ -87,16 +87,6 @@ Checks for cycles and rejects if adding would create one.`,
 			return
 		}
 
-		audit := globalStore.GetAuditLogger()
-		audit.Record(model.AuditDecisionDepAdd, taskID, nil,
-			fmt.Sprintf("添加依赖: %s -> %s", taskID, depID),
-			map[string]string{
-				"dependency": depID,
-				"condition":  string(condition),
-				"weight":   fmt.Sprintf("%d", addDepWeight),
-				"timeout":  fmt.Sprintf("%d", addDepTimeout),
-			})
-
 		fmt.Printf("Dependency added: %s depends on %s\n", taskID, depID)
 		fmt.Printf("  Condition: %s\n", condition)
 		fmt.Printf("  Weight: %d\n", addDepWeight)
@@ -133,13 +123,6 @@ If removing makes all dependencies satisfied, the task becomes queued immediatel
 			fmt.Printf("Dependency not found: %s does not depend on %s\n", taskID, depID)
 			return
 		}
-
-		audit := globalStore.GetAuditLogger()
-		audit.Record(model.AuditDecisionDepRemove, taskID, nil,
-			fmt.Sprintf("移除依赖: %s -> %s", taskID, depID),
-			map[string]string{
-				"dependency": depID,
-			})
 
 		fmt.Printf("Dependency removed: %s no longer depends on %s\n", taskID, depID)
 

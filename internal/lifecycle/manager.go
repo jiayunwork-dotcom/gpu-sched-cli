@@ -172,21 +172,7 @@ func (m *Manager) CompleteTask(id string) {
 	}
 	m.store.ReleaseTaskGPUs(id)
 	m.store.UpdateTaskStatus(id, model.TaskStatusCompleted)
-
-	audit := m.store.GetAuditLogger()
-	graph := m.store.GetDepGraph()
-	dependents := graph.Dependents(id)
-	for _, depID := range dependents {
-		depTask := m.store.GetTask(depID)
-		if depTask != nil && depTask.Status == model.TaskStatusBlocked {
-			if m.store.AreDependenciesSatisfied(depID) {
-				m.store.UpdateTaskStatus(depID, model.TaskStatusQueued)
-				m.pq.Enqueue(depTask)
-				audit.Record(model.AuditDecisionUnblocked, depID, nil,
-					fmt.Sprintf("%s unblocked: dependencies satisfied", depID), nil)
-			}
-		}
-	}
+	m.checkDependentsUnblock(id)
 }
 
 func (m *Manager) FailTask(id string) {
@@ -204,6 +190,7 @@ func (m *Manager) FailTask(id string) {
 		func(taskID string, status model.TaskStatus) { m.store.UpdateTaskStatus(taskID, status) },
 		audit.Record,
 	)
+	m.checkDependentsUnblock(id)
 }
 
 func (m *Manager) CancelTask(id string) {
@@ -223,4 +210,25 @@ func (m *Manager) CancelTask(id string) {
 		func(taskID string, status model.TaskStatus) { m.store.UpdateTaskStatus(taskID, status) },
 		audit.Record,
 	)
+	m.checkDependentsUnblock(id)
+}
+
+func (m *Manager) checkDependentsUnblock(taskID string) {
+	audit := m.store.GetAuditLogger()
+	graph := m.store.GetDepGraph()
+	dependents := graph.Dependents(taskID)
+	for _, depID := range dependents {
+		depTask := m.store.GetTask(depID)
+		if depTask != nil && depTask.Status == model.TaskStatusBlocked {
+			if m.store.HasFailedDependency(depID) {
+				continue
+			}
+			if m.store.AreDependenciesSatisfied(depID) {
+				m.store.UpdateTaskStatus(depID, model.TaskStatusQueued)
+				m.pq.Enqueue(depTask)
+				audit.Record(model.AuditDecisionUnblocked, depID, nil,
+					fmt.Sprintf("%s unblocked: dependencies satisfied", depID), nil)
+			}
+		}
+	}
 }
